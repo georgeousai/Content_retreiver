@@ -104,6 +104,14 @@ class PostgresReelStore:
         ).fetchall()
         return [_to_reel(row) for row in rows]
 
+    def find_by_collection(self, collection: str) -> list[SavedReel]:
+        rows = self._conn.execute(
+            f"SELECT {COLUMNS} FROM saved_reels "
+            "WHERE lower(collection) = lower(%s) ORDER BY saved_at DESC",
+            (collection,),
+        ).fetchall()
+        return [_to_reel(row) for row in rows]
+
     def search(
         self, query_embedding: list[float], top_k: int
     ) -> list[tuple[SavedReel, float]]:

@@ -180,6 +180,19 @@ def test_find_by_author_matches_handle_or_display_name_case_insensitively(store)
     assert [r.url for r in store.find_by_author(f"@{handle}")] == [by_handle]
 
 
+def test_find_by_collection_returns_the_whole_shelf_case_insensitively(store) -> None:
+    embedding = [0.6] * 384
+    collection = f"Pytest{uuid.uuid4().hex[:8]}"
+    first, second = _unique_url(), _unique_url()
+    store.save(_reel(first, embedding=embedding, collection=collection))
+    store.save(_reel(second, embedding=embedding, collection=collection))
+    store.save(_reel(_unique_url(), embedding=embedding, collection="Other"))
+
+    found = store.find_by_collection(collection.lower())
+
+    assert {reel.url for reel in found} == {first, second}
+
+
 def test_set_thumbnail_ref_attaches_a_picture_to_an_existing_reel(store) -> None:
     url = _unique_url()
     store.save(_reel(url, embedding=[0.5] * 384))

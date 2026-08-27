@@ -125,11 +125,15 @@ class QueryKind(Enum):
 @dataclass(frozen=True)
 class QueryClassification:
     """`author` is populated only for AUTHOR_FILTER — the creator the user
-    named. Extracted in the same call as `kind` so classification never costs
-    a second LLM round-trip."""
+    named. `collection` is set whenever the query names one of the vault's
+    existing collections ("my Sales reels"), which scopes retrieval to that
+    shelf instead of guessing at it by similarity. Both are extracted in the
+    same call as `kind`, so classification never costs a second LLM
+    round-trip."""
 
     kind: QueryKind
     author: str | None = None
+    collection: str | None = None
 
 
 @dataclass(frozen=True)
@@ -143,13 +147,15 @@ class ListAnswer:
     type rather than an `AggregateAnswer` with empty `text`, so that
     `AggregateAnswer.text` is always a real synthesized answer.
 
-    `author` is set when the list came from an author filter rather than a
-    topic search — an empty `reels` then means "that creator, nothing saved",
-    which is a different statement from "nothing matched your topic"."""
+    `author` and `collection` record what scoped the list, when something
+    did. An empty `reels` alongside one of them means "that creator/shelf,
+    nothing on it" — a different statement from "nothing matched your
+    topic"."""
 
     query: str
     reels: list[SavedReel]
     author: str | None = None
+    collection: str | None = None
 
 
 @dataclass(frozen=True)

@@ -56,6 +56,24 @@ def test_unparseable_classification_falls_back_to_single(content: str) -> None:
     assert _parse_classification(content).kind is QueryKind.SINGLE
 
 
+def test_a_named_collection_is_snapped_onto_the_vaults_own_spelling() -> None:
+    result = _parse_classification(
+        '{"kind": "LIST", "collection": "sales"}', ["Sales", "Fitness"]
+    )
+
+    assert result.collection == "Sales"
+
+
+def test_a_collection_the_vault_does_not_have_is_dropped() -> None:
+    """Better to fall through to semantic search than to filter on a shelf
+    that cannot match anything."""
+    result = _parse_classification(
+        '{"kind": "LIST", "collection": "Cooking"}', ["Sales", "Fitness"]
+    )
+
+    assert result.collection is None
+
+
 def test_tags_survive_a_fenced_reply() -> None:
     assert _parse_tag_list('```json\n["ai", "Agents"]\n```') == ["ai", "agents"]
 

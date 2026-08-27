@@ -133,6 +133,13 @@ class InMemoryReelStore:
         if reel is not None:
             self._by_url[normalized_url] = replace(reel, thumbnail_ref=thumbnail_ref)
 
+    def find_by_collection(self, collection: str) -> list[SavedReel]:
+        return [
+            reel
+            for reel in self._by_url.values()
+            if reel.collection.casefold() == collection.casefold()
+        ]
+
     def find_by_author(self, name: str) -> list[SavedReel]:
         wanted = name.casefold().lstrip("@")
         return [
@@ -172,7 +179,7 @@ class FakeQueryIntent:
         self._list_triggers = list_triggers
         self._classifications = classifications or {}
 
-    def classify(self, query: str) -> QueryClassification:
+    def classify(self, query: str, collections: list[str]) -> QueryClassification:
         if query in self._classifications:
             return self._classifications[query]
 
@@ -183,10 +190,16 @@ class FakeQueryIntent:
             return QueryClassification(
                 kind=QueryKind.AUTHOR_FILTER, author=handle.group(1)
             )
+
+        # Naming an existing collection scopes the answer to that shelf,
+        # whatever shape of answer was asked for.
+        named = next(
+            (name for name in collections if name.casefold() in lowered), None
+        )
         if any(trigger in lowered for trigger in self._list_triggers):
-            return QueryClassification(kind=QueryKind.LIST)
+            return QueryClassification(kind=QueryKind.LIST, collection=named)
         if any(trigger in lowered for trigger in self._aggregate_triggers):
-            return QueryClassification(kind=QueryKind.AGGREGATE)
+            return QueryClassification(kind=QueryKind.AGGREGATE, collection=named)
         return QueryClassification(kind=QueryKind.SINGLE)
 
 

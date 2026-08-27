@@ -20,6 +20,7 @@ from reel_vault.models import (
     ListAnswer,
     NeedsCollectionChoice,
     NoMatch,
+    QueryClassification,
     QueryKind,
     Saved,
     SavedReel,
@@ -168,7 +169,8 @@ class Vault:
         self._store.set_thumbnail_ref(normalize_reel_url(url), thumbnail_ref)
 
     def ask(self, query: str) -> Answer:
-        classification = self._query_intent.classify(query)
+        known = list(self._store.known_collections())
+        classification = self._query_intent.classify(query, known)
         kind = classification.kind
 
         if kind is QueryKind.AUTHOR_FILTER and classification.author:
@@ -178,6 +180,9 @@ class Vault:
                 reels=found[: self._top_k[kind]],
                 author=classification.author,
             )
+
+        if classification.collection:
+            return self._answer_from_collection(query, classification)
 
         query_embedding = self._embedder.embed(query)
         matches = [
@@ -201,3 +206,28 @@ class Vault:
             return ListAnswer(query=query, reels=matches)
 
         return SingleItemAnswer(reel=matches[0])
+
+    def _answer_from_collection(
+        self, query: str, classification: QueryClassification
+    ) -> Answer:
+        """The user named a shelf, so read the shelf. Similarity ranking has
+        nothing to add here and plenty to lose: "5yrs ago this wasn't a thing"
+        genuinely belongs to Sales, but no query about sales will ever score
+        close enough to a caption like that to clear the threshold."""
+        collection = classification.collection or ""
+        kind = classification.kind
+        reels = self._store.find_by_collection(collection)[: self._top_k[kind]]
+
+        if not reels:
+            return NoMatch(query=query)
+
+        if kind is QueryKind.AGGREGATE:
+            sources = [SummarySource.of(reel) for reel in reels]
+            return AggregateAnswer(
+                text=self._summarizer.summarize(query, sources), reels=reels
+            )
+
+        if kind is QueryKind.SINGLE:
+            return SingleItemAnswer(reel=reels[0])
+
+        return ListAnswer(query=query, reels=reels, collection=collection)

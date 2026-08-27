@@ -40,7 +40,15 @@ TAG_SYSTEM_PROMPT = (
 INTENT_SYSTEM_PROMPT = """\
 You classify a user's request against a personal saved-content vault of \
 social-media posts. Reply with ONLY a JSON object: \
-{"kind": "...", "author": "..." or null}
+{"kind": "...", "author": "..." or null, "collection": "..." or null}
+
+The vault files every post under exactly one COLLECTION, and you are given the \
+collections that currently exist. If the request names one of them - "my Sales \
+reels", "everything in Fitness", "what do my AI reels say" - copy that \
+collection's name EXACTLY into `collection`, matching it even when the user's \
+capitalisation differs. A topic merely mentioned ("reels about biceps") is NOT \
+a collection unless it matches an existing one by name. Otherwise `collection` \
+is null.
 
 `kind` is exactly one of:
 - "AUTHOR_FILTER" - the user wants everything from one specific creator, \
@@ -56,18 +64,34 @@ reel about transformer architecture").
 
 LIST vs AGGREGATE is the key distinction: LIST hands back the items themselves, \
 AGGREGATE reads them and writes an answer. `author` is null unless kind is \
-AUTHOR_FILTER."""
+AUTHOR_FILTER. `collection` is independent of `kind`: "show me my Sales reels" \
+is LIST with collection "Sales"; "summarize my Sales reels" is AGGREGATE with \
+collection "Sales"."""
 
-SUMMARY_SYSTEM_PROMPT = (
-    "You answer a user's question using ONLY the provided captions from their "
-    "saved reels. Synthesize a concise answer grounded in that content. Do not "
-    "invent information not present in the captions.\n\n"
-    "Each caption is labelled with the creator who posted it. When the user "
-    "asks who said what, or to group/attribute by creator, use those labels. "
-    "Never attribute a claim to a creator whose caption does not contain it, "
-    "and never guess at content a caption does not state — a caption is all "
-    "you can see of its reel, not the video itself."
-)
+SUMMARY_SYSTEM_PROMPT = """\
+You answer a user's question using ONLY the provided captions from their saved \
+reels. Each caption is labelled with the creator who posted it.
+
+Answer with the SUBSTANCE, not a description of the substance. If a caption \
+lists four bicep hacks, name them; do not write "shares 4 bicep hacks". The \
+user is reading your answer precisely so they don't have to open the reels, so \
+an answer that sends them back to the reels has failed.
+
+Rules:
+- Report only what the captions actually say. Never invent, and never guess at \
+what the video shows - a caption is all you can see of its reel.
+- Attribute by creator when the user asks who said what, using the labels.
+- SKIP any reel whose caption does not actually address the question. A reel \
+that merely carries a relevant hashtag adds nothing - leave it out rather than \
+padding the answer with it.
+- If none of the captions really answer the question, say so plainly, and say \
+that the content is likely spoken in the videos rather than written in the \
+captions.
+
+Format: plain text for a chat message. NO markdown tables, NO pipes, NO \
+headings, NO bold or italic markers - they are shown to the user literally. \
+Use short paragraphs, or "- " bullets, and write a creator's name inline \
+(e.g. "Kevin Cooper: ...")."""
 
 COLLECTION_SYSTEM_PROMPT = (
     "You file a saved social-media post into a personal library. You are given "
@@ -124,11 +148,14 @@ class GroqTagger(_GroqChatAdapter):
 
 
 class GroqQueryIntent(_GroqChatAdapter):
-    def classify(self, query: str) -> QueryClassification:
+    def classify(self, query: str, collections: list[str]) -> QueryClassification:
+        existing = ", ".join(sorted(collections)) if collections else "(none yet)"
         content = self._complete(
-            system_prompt=INTENT_SYSTEM_PROMPT, user_content=query, temperature=0.0
+            system_prompt=INTENT_SYSTEM_PROMPT,
+            user_content=f"Existing collections: {existing}\n\nRequest:\n{query}",
+            temperature=0.0,
         )
-        return _parse_classification(content)
+        return _parse_classification(content, collections)
 
 
 class GroqCollectionAssigner(_GroqChatAdapter):
@@ -193,7 +220,9 @@ def _loads_json(content: str) -> object | None:
     return None
 
 
-def _parse_classification(content: str) -> QueryClassification:
+def _parse_classification(
+    content: str, collections: list[str] | None = None
+) -> QueryClassification:
     """Parse the classifier's JSON. Anything unparseable falls back to SINGLE —
     the narrowest, cheapest answer shape, and the one the vault has always
     defaulted to."""
@@ -222,7 +251,23 @@ def _parse_classification(content: str) -> QueryClassification:
         logger.warning("Author-filter classification carried no author: %r", content)
         return QueryClassification(kind=QueryKind.LIST)
 
-    return QueryClassification(kind=kind, author=author)
+    raw_collection = parsed.get("collection")
+    collection = str(raw_collection).strip() if raw_collection else None
+    if collection:
+        # Only a collection the vault actually holds can be filtered on; a
+        # near-miss name is snapped back onto the real one, and anything
+        # invented is dropped so retrieval falls back to semantic search.
+        collection = _match_collection(collection, collections or [])
+
+    return QueryClassification(kind=kind, author=author, collection=collection)
+
+
+def _match_collection(name: str, collections: list[str]) -> str | None:
+    for candidate in collections:
+        if candidate.casefold() == name.casefold():
+            return candidate
+    logger.info("Classifier named an unknown collection: %r", name)
+    return None
 
 
 def _parse_assignment(content: str, known: dict[str, list[str]]) -> CollectionAssignment:

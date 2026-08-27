@@ -95,14 +95,28 @@ def _format_reel_detail(reel: SavedReel) -> str:
     return _describe_reel(reel, lead=reel.url)
 
 
-def _format_reel_list(reels: list[SavedReel], *, author: str | None = None) -> str:
+def _format_reel_list(
+    reels: list[SavedReel],
+    *,
+    author: str | None = None,
+    collection: str | None = None,
+) -> str:
     """Many reels, one line each — enough to scan and pick, not the full
     detail block repeated N times."""
     if not reels:
-        return f"Nothing saved from @{author} yet." if author else NO_MATCH_REPLY
+        if author:
+            return f"Nothing saved from @{author} yet."
+        if collection:
+            return f"Nothing saved in {collection} yet."
+        return NO_MATCH_REPLY
 
     count = f"{len(reels)} {'reel' if len(reels) == 1 else 'reels'}"
-    header = f"{count} from @{author}:" if author else f"{count}:"
+    if author:
+        header = f"{count} from @{author}:"
+    elif collection:
+        header = f"{count} in {collection}:"
+    else:
+        header = f"{count}:"
     lines = []
     for reel in reels:
         suffix = f" — @{reel.author_handle}" if reel.author_handle else ""
@@ -196,7 +210,11 @@ class ReelVaultBot:
         if isinstance(result, Saved):
             await self._confirm_save(message, result)
         elif isinstance(result, AlreadySaved):
-            await message.reply_text(_format_saved_reply(result.reel, already_saved=True))
+            # Show the picture here too: recognizing the reel you just
+            # re-shared is the same problem as recognizing one you searched for.
+            await self._reply_with_reel(
+                message, result.reel, _format_saved_reply(result.reel, already_saved=True)
+            )
         elif isinstance(result, NeedsCollectionChoice):
             self._pending_collection_choice[message.chat_id] = result
             await message.reply_text(_format_collection_prompt(result.known_collections))
@@ -233,7 +251,11 @@ class ReelVaultBot:
             await self._reply_with_reel(message, answer.reel)
         elif isinstance(answer, ListAnswer):
             await message.reply_text(
-                _format_reel_list(answer.reels, author=answer.author)
+                _format_reel_list(
+                    answer.reels,
+                    author=answer.author,
+                    collection=answer.collection,
+                )
             )
             await self._send_thumbnails(message, answer.reels)
         elif isinstance(answer, AggregateAnswer):
@@ -247,13 +269,15 @@ class ReelVaultBot:
         elif isinstance(answer, NoMatch):
             await message.reply_text(NO_MATCH_REPLY)
 
-    async def _reply_with_reel(self, message: Message, reel: SavedReel) -> None:
+    async def _reply_with_reel(
+        self, message: Message, reel: SavedReel, text: str | None = None
+    ) -> None:
         """One reel, as a picture the user can recognize where we have one."""
-        detail = _format_reel_detail(reel)
+        body = text if text is not None else _format_reel_detail(reel)
         if reel.thumbnail_ref:
-            await message.reply_photo(photo=reel.thumbnail_ref, caption=detail)
+            await message.reply_photo(photo=reel.thumbnail_ref, caption=body)
         else:
-            await message.reply_text(detail)
+            await message.reply_text(body)
 
     async def _send_thumbnails(self, message: Message, reels: list[SavedReel]) -> None:
         """Pictures to scan alongside the list — every matched reel that has

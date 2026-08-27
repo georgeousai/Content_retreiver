@@ -68,6 +68,12 @@ class ReelStore(Protocol):
         identity question, not a similarity one."""
         ...
 
+    def find_by_collection(self, collection: str) -> list[SavedReel]:
+        """Every reel filed under one collection. Also a plain filter: the
+        taxonomy was decided at save time, so browsing it is a lookup rather
+        than a guess."""
+        ...
+
     def search(
         self, query_embedding: list[float], top_k: int
     ) -> list[tuple[SavedReel, float]]:
@@ -76,11 +82,13 @@ class ReelStore(Protocol):
 
 
 class QueryIntent(Protocol):
-    def classify(self, query: str) -> QueryClassification:
+    def classify(self, query: str, collections: list[str]) -> QueryClassification:
         """Decide what shape of answer the query wants — one reel, a browsable
         list, a synthesized answer across many, or everything by one author —
-        and, for the author case, who. One call, so classification never costs
-        two LLM round-trips."""
+        plus who, and which existing collection the user named, if any.
+        `collections` is what the vault actually holds, so "my Sales reels"
+        can be recognized as naming a shelf rather than describing a topic.
+        One call, so classification never costs two LLM round-trips."""
         ...
 
 
