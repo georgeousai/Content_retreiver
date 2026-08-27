@@ -16,7 +16,12 @@ from collections.abc import Iterable
 
 from groq import Groq
 
-from reel_vault.models import UNCATEGORIZED, CollectionAssignment
+from reel_vault.models import (
+    UNCATEGORIZED,
+    CollectionAssignment,
+    QueryClassification,
+    QueryKind,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,14 +35,26 @@ TAG_SYSTEM_PROMPT = (
     "caption has no discernible topic, reply with an empty JSON array []."
 )
 
-INTENT_SYSTEM_PROMPT = (
-    "You classify a user's request against a personal saved-content vault. "
-    "Reply with ONLY the single word AGGREGATE if the request asks to gather, "
-    "list, or summarize content across multiple saved items (e.g. 'give me all "
-    "the X from my Y items', 'summarize my reels about Z'). Reply with ONLY the "
-    "single word SINGLE if the request is looking for one specific saved item "
-    "(e.g. 'find the reel about X')."
-)
+INTENT_SYSTEM_PROMPT = """\
+You classify a user's request against a personal saved-content vault of \
+social-media posts. Reply with ONLY a JSON object: \
+{"kind": "...", "author": "..." or null}
+
+`kind` is exactly one of:
+- "AUTHOR_FILTER" - the user wants everything from one specific creator, \
+identified by handle or name (e.g. "show me @gymshark's reels", "what have I \
+saved from Andrew Huberman"). Put the creator, without a leading @, in `author`.
+- "LIST" - the user wants to browse/see the saved items matching a topic, as a \
+list (e.g. "show me all my reels about AI", "what reels do I have on sourdough").
+- "AGGREGATE" - the user wants content gathered and synthesized ACROSS several \
+saved items into a written answer (e.g. "give me all the interview questions \
+from my AI reels", "summarize what my finance reels say about index funds").
+- "SINGLE" - the user is looking for one specific saved item (e.g. "find that \
+reel about transformer architecture").
+
+LIST vs AGGREGATE is the key distinction: LIST hands back the items themselves, \
+AGGREGATE reads them and writes an answer. `author` is null unless kind is \
+AUTHOR_FILTER."""
 
 SUMMARY_SYSTEM_PROMPT = (
     "You answer a user's question using ONLY the provided captions from their "
@@ -100,11 +117,11 @@ class GroqTagger(_GroqChatAdapter):
 
 
 class GroqQueryIntent(_GroqChatAdapter):
-    def is_aggregate(self, query: str) -> bool:
+    def classify(self, query: str) -> QueryClassification:
         content = self._complete(
             system_prompt=INTENT_SYSTEM_PROMPT, user_content=query, temperature=0.0
         )
-        return "AGGREGATE" in content.strip().upper()
+        return _parse_classification(content)
 
 
 class GroqCollectionAssigner(_GroqChatAdapter):
@@ -129,6 +146,39 @@ class GroqSummarizer(_GroqChatAdapter):
         return self._complete(
             system_prompt=SUMMARY_SYSTEM_PROMPT, user_content=user_content, temperature=0.3
         )
+
+
+def _parse_classification(content: str) -> QueryClassification:
+    """Parse the classifier's JSON. Anything unparseable falls back to SINGLE —
+    the narrowest, cheapest answer shape, and the one the vault has always
+    defaulted to."""
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        logger.warning("Query classifier returned non-JSON content: %r", content)
+        return QueryClassification(kind=QueryKind.SINGLE)
+
+    if not isinstance(parsed, dict):
+        return QueryClassification(kind=QueryKind.SINGLE)
+
+    raw_kind = str(parsed.get("kind") or "").strip().upper()
+    try:
+        kind = QueryKind[raw_kind]
+    except KeyError:
+        logger.warning("Query classifier returned unknown kind: %r", raw_kind)
+        return QueryClassification(kind=QueryKind.SINGLE)
+
+    raw_author = parsed.get("author")
+    author = str(raw_author).strip().lstrip("@") or None if raw_author else None
+    if kind is not QueryKind.AUTHOR_FILTER:
+        author = None
+    elif author is None:
+        # An author filter with nobody to filter on is not actionable; the
+        # semantic path at least stands a chance of matching the handle text.
+        logger.warning("Author-filter classification carried no author: %r", content)
+        return QueryClassification(kind=QueryKind.LIST)
+
+    return QueryClassification(kind=kind, author=author)
 
 
 def _parse_assignment(content: str, known: dict[str, list[str]]) -> CollectionAssignment:

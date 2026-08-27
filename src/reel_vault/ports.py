@@ -7,7 +7,12 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from reel_vault.models import CollectionAssignment, ExtractedPost, SavedReel
+from reel_vault.models import (
+    CollectionAssignment,
+    ExtractedPost,
+    QueryClassification,
+    SavedReel,
+)
 
 
 class CaptionFetcher(Protocol):
@@ -57,9 +62,11 @@ class ReelStore(Protocol):
 
 
 class QueryIntent(Protocol):
-    def is_aggregate(self, query: str) -> bool:
-        """True if the query asks for a synthesized answer across many reels
-        rather than a single matching reel."""
+    def classify(self, query: str) -> QueryClassification:
+        """Decide what shape of answer the query wants — one reel, a browsable
+        list, a synthesized answer across many, or everything by one author —
+        and, for the author case, who. One call, so classification never costs
+        two LLM round-trips."""
         ...
 
 

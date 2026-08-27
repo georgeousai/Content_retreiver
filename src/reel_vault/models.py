@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 
 UNCATEGORIZED = "Uncategorized"
 
@@ -80,9 +81,39 @@ class NeedsCollectionChoice:
 SaveResult = Saved | AlreadySaved | ExtractionFailed | NeedsCollectionChoice
 
 
+class QueryKind(Enum):
+    """What shape of answer a query is asking for. Chosen by `QueryIntent`
+    in a single classification call — never by the user picking a mode."""
+
+    SINGLE = "single"
+    LIST = "list"
+    AGGREGATE = "aggregate"
+    AUTHOR_FILTER = "author_filter"
+
+
+@dataclass(frozen=True)
+class QueryClassification:
+    """`author` is populated only for AUTHOR_FILTER — the creator the user
+    named. Extracted in the same call as `kind` so classification never costs
+    a second LLM round-trip."""
+
+    kind: QueryKind
+    author: str | None = None
+
+
 @dataclass(frozen=True)
 class SingleItemAnswer:
     reel: SavedReel
+
+
+@dataclass(frozen=True)
+class ListAnswer:
+    """Matched reels handed back as-is, for browsing. Deliberately a distinct
+    type rather than an `AggregateAnswer` with empty `text`, so that
+    `AggregateAnswer.text` is always a real synthesized answer."""
+
+    query: str
+    reels: list[SavedReel]
 
 
 @dataclass(frozen=True)
@@ -96,4 +127,4 @@ class NoMatch:
     query: str
 
 
-Answer = SingleItemAnswer | AggregateAnswer | NoMatch
+Answer = SingleItemAnswer | ListAnswer | AggregateAnswer | NoMatch

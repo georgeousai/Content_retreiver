@@ -4,9 +4,17 @@ per the spec's testing decisions (tests target the seam, not the adapters)."""
 from __future__ import annotations
 
 import math
+import re
 import zlib
+from collections.abc import Mapping
 
-from reel_vault.models import CollectionAssignment, ExtractedPost, SavedReel
+from reel_vault.models import (
+    CollectionAssignment,
+    ExtractedPost,
+    QueryClassification,
+    QueryKind,
+    SavedReel,
+)
 from reel_vault.urls import normalize_reel_url
 
 
@@ -15,7 +23,7 @@ class FakeCaptionFetcher:
     failure. Plain strings are accepted as a shorthand for a caption with no
     author attached."""
 
-    def __init__(self, posts: dict[str, ExtractedPost | str | None]) -> None:
+    def __init__(self, posts: Mapping[str, ExtractedPost | str | None]) -> None:
         self._posts = posts
 
     def fetch(self, url: str) -> ExtractedPost | None:
@@ -123,19 +131,44 @@ class InMemoryReelStore:
 
 
 class FakeQueryIntent:
-    """Aggregate iff the query contains any of a caller-supplied set of
-    trigger phrases; defaults to keywords like 'all'/'summarize'."""
+    """Keyword-driven stand-in for the LLM classifier. Checks in priority
+    order — an @handle means an author filter, then browse phrasing, then
+    aggregate phrasing — because real queries overlap ('show me all my X
+    reels' browses; 'give me all the X from my Y' synthesizes)."""
 
-    def __init__(self, aggregate_triggers: tuple[str, ...] = ("all", "summarize", "every")) -> None:
-        self._triggers = aggregate_triggers
+    def __init__(
+        self,
+        aggregate_triggers: tuple[str, ...] = ("give me all", "summarize", "every"),
+        list_triggers: tuple[str, ...] = ("show me", "list ", "browse"),
+    ) -> None:
+        self._aggregate_triggers = aggregate_triggers
+        self._list_triggers = list_triggers
 
-    def is_aggregate(self, query: str) -> bool:
+    def classify(self, query: str) -> QueryClassification:
         lowered = query.lower()
-        return any(trigger in lowered for trigger in self._triggers)
+
+        handle = re.search(r"@([\w.]+)", query)
+        if handle:
+            return QueryClassification(
+                kind=QueryKind.AUTHOR_FILTER, author=handle.group(1)
+            )
+        if any(trigger in lowered for trigger in self._list_triggers):
+            return QueryClassification(kind=QueryKind.LIST)
+        if any(trigger in lowered for trigger in self._aggregate_triggers):
+            return QueryClassification(kind=QueryKind.AGGREGATE)
+        return QueryClassification(kind=QueryKind.SINGLE)
 
 
 class FakeSummarizer:
+    """Records what it was asked to summarize, so tests can assert both that
+    a list query never reaches it and that aggregate queries hand it the
+    right captions."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, list[str]]] = []
+
     def summarize(self, query: str, captions: list[str]) -> str:
+        self.calls.append((query, list(captions)))
         return " | ".join(captions)
 
 

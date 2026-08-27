@@ -13,6 +13,7 @@ from reel_vault.models import (
     AggregateAnswer,
     AlreadySaved,
     ExtractionFailed,
+    ListAnswer,
     NeedsCollectionChoice,
     NoMatch,
     Saved,
@@ -66,6 +67,26 @@ def _parse_collection_reply(text: str) -> tuple[str, str | None]:
         collection, subcollection = text.split("/", 1)
         return collection.strip(), subcollection.strip() or None
     return text.strip(), None
+
+
+def _format_reel_detail(reel: SavedReel) -> str:
+    """One reel, in full — the reply when the user wanted exactly this one."""
+    tags_text = ", ".join(f"#{tag}" for tag in reel.tags)
+    lines = [reel.url, f"📁 {_format_location(reel)}", f"🏷️ {tags_text}"]
+    if reel.author_handle:
+        lines.append(f"👤 @{reel.author_handle}")
+    return "\n".join(lines)
+
+
+def _format_reel_list(reels: list[SavedReel]) -> str:
+    """Many reels, one line each — enough to scan and pick, not the full
+    detail block repeated N times."""
+    header = f"{len(reels)} {'reel' if len(reels) == 1 else 'reels'}:"
+    lines = []
+    for reel in reels:
+        suffix = f" — @{reel.author_handle}" if reel.author_handle else ""
+        lines.append(f"• {reel.url} ({_format_location(reel)}){suffix}")
+    return "\n".join([header, *lines])
 
 
 def _format_saved_reply(reel: SavedReel, *, already_saved: bool) -> str:
@@ -169,12 +190,9 @@ class ReelVaultBot:
         answer = self._vault.ask(query)
 
         if isinstance(answer, SingleItemAnswer):
-            reel = answer.reel
-            tags_text = ", ".join(f"#{tag}" for tag in reel.tags)
-            lines = [reel.url, f"📁 {_format_location(reel)}", f"🏷️ {tags_text}"]
-            if reel.author_handle:
-                lines.append(f"👤 @{reel.author_handle}")
-            await message.reply_text("\n".join(lines))
+            await message.reply_text(_format_reel_detail(answer.reel))
+        elif isinstance(answer, ListAnswer):
+            await message.reply_text(_format_reel_list(answer.reels))
         elif isinstance(answer, AggregateAnswer):
             await message.reply_text(answer.text)
         elif isinstance(answer, NoMatch):

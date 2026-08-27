@@ -15,8 +15,10 @@ from reel_vault.models import (
     Answer,
     ExtractedPost,
     ExtractionFailed,
+    ListAnswer,
     NeedsCollectionChoice,
     NoMatch,
+    QueryKind,
     Saved,
     SavedReel,
     SaveResult,
@@ -34,7 +36,13 @@ from reel_vault.ports import (
 from reel_vault.urls import normalize_reel_url
 
 DEFAULT_MATCH_THRESHOLD = 0.35
-DEFAULT_TOP_K = 5
+
+# One cap per intent, not one shared cap: a list costs only a database read, so
+# it can be generous, while every reel in an aggregate becomes part of a single
+# LLM prompt — the free-tier budget, not relevance, is what bounds it.
+DEFAULT_TOP_K_SINGLE = 5
+DEFAULT_TOP_K_LIST = 50
+DEFAULT_TOP_K_AGGREGATE = 15
 
 
 class Vault:
@@ -49,7 +57,9 @@ class Vault:
         query_intent: QueryIntent,
         summarizer: Summarizer,
         match_threshold: float = DEFAULT_MATCH_THRESHOLD,
-        top_k: int = DEFAULT_TOP_K,
+        top_k_single: int = DEFAULT_TOP_K_SINGLE,
+        top_k_list: int = DEFAULT_TOP_K_LIST,
+        top_k_aggregate: int = DEFAULT_TOP_K_AGGREGATE,
     ) -> None:
         self._caption_fetcher = caption_fetcher
         self._tagger = tagger
@@ -59,7 +69,14 @@ class Vault:
         self._query_intent = query_intent
         self._summarizer = summarizer
         self._match_threshold = match_threshold
-        self._top_k = top_k
+        self._top_k = {
+            QueryKind.SINGLE: top_k_single,
+            QueryKind.LIST: top_k_list,
+            QueryKind.AGGREGATE: top_k_aggregate,
+            # Author queries are a plain filter, not a similarity search; the
+            # list cap is what bounds how many get shown.
+            QueryKind.AUTHOR_FILTER: top_k_list,
+        }
 
     def save_reel(self, url: str, *, manual_caption: str | None = None) -> SaveResult:
         normalized = normalize_reel_url(url)
@@ -131,18 +148,26 @@ class Vault:
         return Saved(reel=reel)
 
     def ask(self, query: str) -> Answer:
+        classification = self._query_intent.classify(query)
+        kind = classification.kind
+
         query_embedding = self._embedder.embed(query)
         matches = [
             reel
-            for reel, similarity in self._store.search(query_embedding, self._top_k)
+            for reel, similarity in self._store.search(query_embedding, self._top_k[kind])
             if similarity >= self._match_threshold
         ]
 
         if not matches:
             return NoMatch(query=query)
 
-        if self._query_intent.is_aggregate(query):
+        if kind is QueryKind.AGGREGATE:
             text = self._summarizer.summarize(query, [reel.caption for reel in matches])
             return AggregateAnswer(text=text, reels=matches)
+
+        # AUTHOR_FILTER still falls back to a semantic list here; its own
+        # filter-by-author path arrives with the next ticket.
+        if kind in (QueryKind.LIST, QueryKind.AUTHOR_FILTER):
+            return ListAnswer(query=query, reels=matches)
 
         return SingleItemAnswer(reel=matches[0])
