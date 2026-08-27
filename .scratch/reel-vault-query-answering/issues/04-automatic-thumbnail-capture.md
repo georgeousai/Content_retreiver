@@ -10,10 +10,10 @@ This ticket is verifiable at the vault/model level (the reference is captured an
 
 **Blocked by:** None — can start immediately. Touches the save path, independent of the query-answering work in 01-03.
 
-- [ ] `ExtractedPost` carries an optional `thumbnail_url`, populated by the caption fetchers when available.
-- [ ] Saving a reel whose extraction includes a thumbnail results in a `SavedReel.thumbnail_ref` populated via the `ThumbnailStore`.
-- [ ] Saving a reel with no available thumbnail results in `thumbnail_ref is None`, with no call made to the thumbnail store, and the save otherwise succeeding normally.
-- [ ] The persisted reference is the durable Telegram `file_id`, not the raw expiring Instagram CDN URL.
-- [ ] A save that pauses on `NeedsCollectionChoice` carries `thumbnail_ref` through to the `SavedReel` produced by `assign_collection`, with no second thumbnail upload.
-- [ ] Thumbnail capture failing (e.g. upload error) does not fail the whole save — the reel still saves with `thumbnail_ref is None`.
+- [x] `ExtractedPost` carries an optional `thumbnail_url`, populated by the caption fetchers when available.
+- [x] Saving a reel whose extraction includes a thumbnail results in a `SavedReel.thumbnail_ref` populated via the `ThumbnailStore`.
+- [x] Saving a reel with no available thumbnail results in `thumbnail_ref is None`, with no call made to the thumbnail store, and the save otherwise succeeding normally.
+- [x] The persisted reference is the durable Telegram `file_id`, not the raw expiring Instagram CDN URL.
+- [x] A save that pauses on `NeedsCollectionChoice` carries `thumbnail_ref` through to the `SavedReel` produced by `assign_collection`, with no second thumbnail upload.
+- [x] Thumbnail capture failing (e.g. upload error) does not fail the whole save — the reel still saves with `thumbnail_ref is None`.
 </content>

@@ -6,9 +6,9 @@
 
 **Blocked by:** 01 — `AGGREGATE` routing moves into the new `classify()`-based path established there.
 
-- [ ] `Summarizer.summarize` receives each matched reel's author info alongside its caption.
-- [ ] A query like "summarize X and group by creator," where the matched captions actually contain attributable content, produces an answer that references the correct creator(s).
-- [ ] A query about content that only exists in a reel's video/audio (not its caption) does not fabricate an attribution — the answer simply doesn't contain information that was never in the caption.
-- [ ] Aggregate bot replies include the matched reels' links (not just the synthesized `text`).
-- [ ] Existing aggregate-answer tests (matched-captions-only synthesis, non-matching content excluded) continue to pass.
+- [x] `Summarizer.summarize` receives each matched reel's author info alongside its caption.
+- [x] A query like "summarize X and group by creator," where the matched captions actually contain attributable content, produces an answer that references the correct creator(s).
+- [x] A query about content that only exists in a reel's video/audio (not its caption) does not fabricate an attribution — the answer simply doesn't contain information that was never in the caption.
+- [x] Aggregate bot replies include the matched reels' links (not just the synthesized `text`).
+- [x] Existing aggregate-answer tests (matched-captions-only synthesis, non-matching content excluded) continue to pass.
 </content>

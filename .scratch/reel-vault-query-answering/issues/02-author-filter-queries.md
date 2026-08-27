@@ -6,9 +6,9 @@
 
 **Blocked by:** 01 — needs the `classify()`/`ListAnswer` plumbing it establishes.
 
-- [ ] `ReelStore.find_by_author(name)` returns all reels whose stored author matches, independent of caption content or embedding similarity.
-- [ ] A query like "show me @creator's reels" classifies as `AUTHOR_FILTER` and the extracted author name is passed to `find_by_author`.
-- [ ] An `AUTHOR_FILTER` query does not call the embedder or the store's `search`/similarity path at all.
-- [ ] The result is returned as a `ListAnswer` and rendered by the bot the same way as a topic-based `LIST` answer.
-- [ ] A query for an author with no saved reels returns an appropriately empty result (not an error, not `NoMatch` conflated with "no semantic match" if that type doesn't fit — use whatever `Answer` shape correctly represents "author matched, zero reels").
+- [x] `ReelStore.find_by_author(name)` returns all reels whose stored author matches, independent of caption content or embedding similarity.
+- [x] A query like "show me @creator's reels" classifies as `AUTHOR_FILTER` and the extracted author name is passed to `find_by_author`.
+- [x] An `AUTHOR_FILTER` query does not call the embedder or the store's `search`/similarity path at all.
+- [x] The result is returned as a `ListAnswer` and rendered by the bot the same way as a topic-based `LIST` answer.
+- [x] A query for an author with no saved reels returns an appropriately empty result (not an error, not `NoMatch` conflated with "no semantic match" if that type doesn't fit — use whatever `Answer` shape correctly represents "author matched, zero reels").
 </content>

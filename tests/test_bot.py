@@ -246,6 +246,33 @@ async def test_list_reply_sends_the_matching_reels_pictures(bot: ReelVaultBot) -
     assert "instagram.com/reel/A1" in message.reply_text.await_args.args[0]
 
 
+async def test_more_than_one_album_of_matches_still_all_get_pictures(
+    bot: ReelVaultBot,
+) -> None:
+    """Telegram caps an album at 10; a 12-match browse must not silently drop
+    the last two pictures."""
+    captions = {
+        f"https://instagram.com/reel/N{i}": ExtractedPost(
+            caption=f"ai agents topic number{i}", thumbnail_url=f"https://cdn/{i}.jpg"
+        )
+        for i in range(12)
+    }
+    bot._vault = make_vault(captions=captions, thumbnail_store=FakeThumbnailStore())
+    for url in captions:
+        assert isinstance(bot._vault.save_reel(url), Saved)
+
+    message = _make_message("show me my ai agents reels")
+    await bot._on_message(_make_update(message), MagicMock())
+
+    sent = [
+        item.media
+        for call in message.reply_media_group.await_args_list
+        for item in call.args[0]
+    ]
+    assert len(sent) == 12
+    assert len(set(sent)) == 12
+
+
 async def test_plain_text_query_delegates_to_ask(bot: ReelVaultBot) -> None:
     result = bot._vault.save_reel("https://instagram.com/reel/ABC")
     assert isinstance(result, Saved)

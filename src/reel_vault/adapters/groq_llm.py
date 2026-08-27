@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Iterable
 
 from groq import Groq
@@ -165,13 +166,39 @@ def _format_source(source: SummarySource) -> str:
     return f"- [by {who}] {source.caption}"
 
 
+def _loads_json(content: str) -> object | None:
+    """Parse a model's JSON reply, tolerating the ```json fences and stray
+    preamble chat models wrap answers in. Returns None if nothing parses.
+
+    Being strict here is expensive: an unparsed reply is not an error the
+    user ever sees, it is silently the wrong answer shape."""
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        pass
+
+    fenced = re.search(r"```(?:json)?\s*(.+?)```", content, re.DOTALL)
+    candidates = [fenced.group(1)] if fenced else []
+    # Fall back to the outermost object/array anywhere in the reply.
+    for opener, closer in (("{", "}"), ("[", "]")):
+        start, end = content.find(opener), content.rfind(closer)
+        if start != -1 and end > start:
+            candidates.append(content[start : end + 1])
+
+    for candidate in candidates:
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
 def _parse_classification(content: str) -> QueryClassification:
     """Parse the classifier's JSON. Anything unparseable falls back to SINGLE —
     the narrowest, cheapest answer shape, and the one the vault has always
     defaulted to."""
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError:
+    parsed = _loads_json(content)
+    if parsed is None:
         logger.warning("Query classifier returned non-JSON content: %r", content)
         return QueryClassification(kind=QueryKind.SINGLE)
 
@@ -201,9 +228,8 @@ def _parse_classification(content: str) -> QueryClassification:
 def _parse_assignment(content: str, known: dict[str, list[str]]) -> CollectionAssignment:
     """Parse the model's JSON, then snap near-miss names back onto existing
     collections so casing/whitespace drift can't fork a duplicate collection."""
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError:
+    parsed = _loads_json(content)
+    if parsed is None:
         logger.warning("Collection assigner returned non-JSON content: %r", content)
         return CollectionAssignment(collection=UNCATEGORIZED)
 
@@ -229,9 +255,8 @@ def _canonicalize(name: str, existing: Iterable[str]) -> str:
 
 
 def _parse_tag_list(content: str) -> list[str]:
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError:
+    parsed = _loads_json(content)
+    if parsed is None:
         logger.warning("Groq tagger returned non-JSON content: %r", content)
         return []
 

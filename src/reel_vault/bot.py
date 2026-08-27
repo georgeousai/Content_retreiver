@@ -34,10 +34,11 @@ INSTAGRAM_REEL_URL = re.compile(
 
 INSTAGRAM_URL = re.compile(r"https?://(?:www\.)?instagram\.com/\S*", re.IGNORECASE)
 
-# Telegram caps a media group at 10. The full list always goes out as text, so
-# this bounds how many pictures accompany it, not how many results the user
-# gets.
-MAX_THUMBNAILS = 10
+# Telegram caps a media group at 10, so longer runs of reels go out as
+# several albums.
+MEDIA_GROUP_LIMIT = 10
+
+NO_MATCH_REPLY = "Nothing in the vault matches that."
 
 
 def _format_location(reel: SavedReel) -> str:
@@ -74,24 +75,27 @@ def _parse_collection_reply(text: str) -> tuple[str, str | None]:
     return text.strip(), None
 
 
-def _format_reel_detail(reel: SavedReel) -> str:
-    """One reel, in full — the reply when the user wanted exactly this one."""
-    tags_text = ", ".join(f"#{tag}" for tag in reel.tags)
-    lines = [reel.url, f"📁 {_format_location(reel)}", f"🏷️ {tags_text}"]
+def _describe_reel(reel: SavedReel, *, lead: str) -> str:
+    """The collection/tags/author block every single-reel reply shares, under
+    whatever line introduces it."""
+    tags_text = ", ".join(f"#{tag}" for tag in reel.tags) if reel.tags else "(no tags)"
+    lines = [lead, f"📁 {_format_location(reel)}", f"🏷️ {tags_text}"]
     if reel.author_handle:
         lines.append(f"👤 @{reel.author_handle}")
     return "\n".join(lines)
+
+
+def _format_reel_detail(reel: SavedReel) -> str:
+    """One reel, in full — the reply when the user wanted exactly this one,
+    led by the link so it is tappable."""
+    return _describe_reel(reel, lead=reel.url)
 
 
 def _format_reel_list(reels: list[SavedReel], *, author: str | None = None) -> str:
     """Many reels, one line each — enough to scan and pick, not the full
     detail block repeated N times."""
     if not reels:
-        return (
-            f"Nothing saved from @{author} yet."
-            if author
-            else "Nothing in the vault matches that."
-        )
+        return f"Nothing saved from @{author} yet." if author else NO_MATCH_REPLY
 
     count = f"{len(reels)} {'reel' if len(reels) == 1 else 'reels'}"
     header = f"{count} from @{author}:" if author else f"{count}:"
@@ -103,15 +107,9 @@ def _format_reel_list(reels: list[SavedReel], *, author: str | None = None) -> s
 
 
 def _format_saved_reply(reel: SavedReel, *, already_saved: bool) -> str:
-    tags_text = ", ".join(f"#{tag}" for tag in reel.tags) if reel.tags else "(no tags)"
-    lines = [
-        "Already saved that one." if already_saved else "Saved!",
-        f"📁 {_format_location(reel)}",
-        f"🏷️ {tags_text}",
-    ]
-    if reel.author_handle:
-        lines.append(f"👤 @{reel.author_handle}")
-    return "\n".join(lines)
+    return _describe_reel(
+        reel, lead="Already saved that one." if already_saved else "Saved!"
+    )
 
 
 class ReelVaultBot:
@@ -218,7 +216,7 @@ class ReelVaultBot:
             )
             await self._send_thumbnails(message, answer.reels)
         elif isinstance(answer, NoMatch):
-            await message.reply_text("Nothing in the vault matches that.")
+            await message.reply_text(NO_MATCH_REPLY)
 
     async def _reply_with_reel(self, message: Message, reel: SavedReel) -> None:
         """One reel, as a picture the user can recognize where we have one."""
@@ -229,19 +227,22 @@ class ReelVaultBot:
             await message.reply_text(detail)
 
     async def _send_thumbnails(self, message: Message, reels: list[SavedReel]) -> None:
-        """Pictures to scan alongside the list. Reels saved before thumbnails
-        existed simply have none, and are already in the text list."""
-        media = [
-            InputMediaPhoto(media=reel.thumbnail_ref, caption=reel.url)
-            for reel in reels[:MAX_THUMBNAILS]
-            if reel.thumbnail_ref
+        """Pictures to scan alongside the list — every matched reel that has
+        one, in albums of ten. Reels saved before thumbnails existed have
+        none, and are already in the text list."""
+        pictures = [
+            (reel.thumbnail_ref, reel.url) for reel in reels if reel.thumbnail_ref
         ]
-        if not media:
-            return
-        if len(media) == 1:
-            await message.reply_photo(photo=media[0].media, caption=media[0].caption)
-            return
-        await message.reply_media_group(media)
+
+        for start in range(0, len(pictures), MEDIA_GROUP_LIMIT):
+            batch = pictures[start : start + MEDIA_GROUP_LIMIT]
+            if len(batch) == 1:
+                ref, url = batch[0]
+                await message.reply_photo(photo=ref, caption=url)
+                continue
+            await message.reply_media_group(
+                [InputMediaPhoto(media=ref, caption=url) for ref, url in batch]
+            )
 
 
 def build_bot(vault: Vault, token: str) -> ReelVaultBot:

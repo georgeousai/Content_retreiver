@@ -6,10 +6,10 @@ Specifically: the `QueryIntent` port changes from `is_aggregate(query) -> bool` 
 
 **Blocked by:** None — can start immediately.
 
-- [ ] `QueryIntent.classify(query)` returns `SINGLE`, `LIST`, or `AGGREGATE` for the corresponding phrasing (`AUTHOR_FILTER` case is exercised in ticket 02, but the type/shape exists here).
-- [ ] A `LIST`-classified query returns a new `ListAnswer{query, reels}` containing the matched reels, with no call made to the summarizer.
-- [ ] `LIST` queries return up to their own (generous) cap, not silently truncated to the old shared `top_k=5`.
-- [ ] `AGGREGATE` queries are capped at their own (moderate) limit, independent of `LIST`'s cap.
-- [ ] Existing `SINGLE`-query behavior is unchanged (existing `test_ask.py` single-item and no-match tests continue to pass against the new `classify()`-based routing).
-- [ ] The bot formats a `ListAnswer` reply as the list of matched reels' links/tags (not synthesized text).
+- [x] `QueryIntent.classify(query)` returns `SINGLE`, `LIST`, or `AGGREGATE` for the corresponding phrasing (`AUTHOR_FILTER` case is exercised in ticket 02, but the type/shape exists here).
+- [x] A `LIST`-classified query returns a new `ListAnswer{query, reels}` containing the matched reels, with no call made to the summarizer.
+- [x] `LIST` queries return up to their own (generous) cap, not silently truncated to the old shared `top_k=5`.
+- [x] `AGGREGATE` queries are capped at their own (moderate) limit, independent of `LIST`'s cap.
+- [x] Existing `SINGLE`-query behavior is unchanged (existing `test_ask.py` single-item and no-match tests continue to pass against the new `classify()`-based routing).
+- [x] The bot formats a `ListAnswer` reply as the list of matched reels' links/tags (not synthesized text).
 </content>

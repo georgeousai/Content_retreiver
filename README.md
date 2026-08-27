@@ -33,12 +33,17 @@ flowchart LR
     G --> B
 
     B --> H{"ask(query)"}
-    H --> I["Semantic<br/>search"]
+    H --> J{"What kind<br/>of question?"}
+    J -->|by creator| M["🗂️ Filter by author<br/>(no embedding)"]
+    J -->|single / list / aggregate| I["Semantic<br/>search"]
     I --> G
-    I --> J{"Single item<br/>or aggregate?"}
-    J -->|single| K["🔗 Link + tags"]
-    J -->|aggregate| L["📝 Synthesized<br/>answer"]
+    M --> G
+    I --> K["🔗 One reel<br/>+ picture"]
+    I --> N["📜 List of matches<br/>+ pictures"]
+    I --> L["📝 Synthesized answer<br/>+ the reels behind it"]
+    M --> N
     K --> B
+    N --> B
     L --> B
 ```
 
@@ -48,13 +53,15 @@ flowchart LR
 
 **When the LLM isn't confident, it asks instead of guessing.** Some captions genuinely carry no topic (`"5 years ago this wasn't a thing"`) — the video's content may be entirely visual. Rather than silently filing those under an unrelated existing collection or a meaningless catch-all, the save pauses: the bot lists your existing collections and asks you to pick one (or name a new one, or reply `skip` to leave it Uncategorized). Nothing already computed — caption, tags, embedding, author — gets redone once you answer.
 
-**Asking.** You type a question into the same chat. The query gets embedded, matched against your stored reels by cosine similarity, and then — this is the interesting part — the LLM decides *what kind* of question you asked. Looking for one specific reel? You get its link and tags. Asking to pull something together across a topic? You get a synthesized answer built only from the captions of the reels that actually matched. You never pick a mode; it just works out which you meant.
+**Asking.** You type a question into the same chat and — this is the interesting part — the LLM decides *what kind* of question you asked, in one classification call. Looking for one specific reel? You get it, with its picture. Want to browse everything on a topic? You get the list, with pictures to recognize them by. Want something pulled together across a topic? You get a synthesized answer built only from the captions that actually matched, plus the reels it was built from, so you can go watch them. Asking for one creator's reels (`show me @gymshark's reels`) skips semantic search entirely and filters by author — "everything from X" is an identity question, not a similarity one. You never pick a mode; it works out which you meant.
+
+**What the answers can and can't know.** Synthesized answers are told who posted each caption, so "which creator said what" works — but only for content actually written in the caption. A reel whose substance is *spoken* in the video is invisible to the vault until audio transcription exists (see Roadmap).
 
 ---
 
 ## Status
 
-**v1 is built and working end-to-end against real services.** All four tickets from the spec are implemented, with 16 tests passing and a clean `mypy` run.
+**v1 is built and working end-to-end against real services**, with 69 tests passing and a clean `mypy` run.
 
 | # | Capability | Status |
 |---|---|---|
@@ -62,6 +69,16 @@ flowchart LR
 | 02 | Extraction fallback — scraper backup, then manual-paste recovery | ✅ Done |
 | 03 | Single-item retrieval — semantic search returning one reel's link and tags | ✅ Done |
 | 04 | Aggregate queries — LLM-synthesized answers across a matched set | ✅ Done |
+
+Since then, a second slice ([`.scratch/reel-vault-query-answering/`](.scratch/reel-vault-query-answering/)) widened what `ask()` understands:
+
+| # | Capability | Status |
+|---|---|---|
+| 01 | Four-way query classification, browse/list answers, per-intent match caps | ✅ Done |
+| 02 | Author-filter queries — "show me @creator's reels", no embedding involved | ✅ Done |
+| 03 | Author-aware synthesis, and aggregate replies that name the reels behind them | ✅ Done |
+| 04 | Automatic thumbnail capture, stored as a non-expiring Telegram `file_id` | ✅ Done |
+| 05 | Thumbnails rendered in single, list, and aggregate replies | ✅ Done |
 
 **Deliberately not in v1:** LinkedIn and blog sources, audio transcription, on-screen text (OCR), video downloads, multi-user accounts, a web UI, and cloud hosting. The architecture is built so these are *additive* rather than rewrites — see [the roadmap](#where-this-is-going).
 
@@ -86,6 +103,7 @@ src/reel_vault/
     ├── caption.py         ← oEmbed → yt-dlp fallback chain
     ├── groq_llm.py        ← tagging, intent classification, summarization
     ├── embedder.py        ← local sentence-transformers, CPU only
+    ├── thumbnail.py       ← uploads to Telegram, keeps the file_id
     └── postgres_store.py  ← Postgres/pgvector persistence
 ```
 
@@ -193,7 +211,7 @@ Two things that will bite eventually, documented so they don't cost you an after
 
 **Groq's model lineup shifts.** The originally-specified Llama chat models have already been retired from the free tier. If tagging starts returning 404s, run `client.models.list()` to see what's currently available and update `DEFAULT_MODEL` in `adapters/groq_llm.py` — it's a single constant.
 
-**Tuning retrieval.** `vault.py` exposes `DEFAULT_MATCH_THRESHOLD` (0.35) and `DEFAULT_TOP_K` (5). Raise the threshold if unrelated reels surface; lower it if good matches are being rejected as `NoMatch`.
+**Tuning retrieval.** `vault.py` exposes `DEFAULT_MATCH_THRESHOLD` (0.35) and one cap per question type: `DEFAULT_TOP_K_SINGLE` (5), `DEFAULT_TOP_K_LIST` (50), `DEFAULT_TOP_K_AGGREGATE` (15). They differ on purpose — a list costs only a database read, while every reel in an aggregate becomes part of a single LLM prompt, so the free-tier budget is what bounds it. Raise the threshold if unrelated reels surface; lower it if good matches are being rejected as `NoMatch`.
 
 **After a reboot,** bring the database back with `docker start reel-vault-db`.
 

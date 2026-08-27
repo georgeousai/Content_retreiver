@@ -81,8 +81,8 @@ class Vault:
             QueryKind.SINGLE: top_k_single,
             QueryKind.LIST: top_k_list,
             QueryKind.AGGREGATE: top_k_aggregate,
-            # Author queries are a plain filter, not a similarity search; the
-            # list cap is what bounds how many get shown.
+            # Author queries are a plain filter, not a similarity search, so
+            # this bounds the rows handed back rather than the search itself.
             QueryKind.AUTHOR_FILTER: top_k_list,
         }
 
@@ -175,9 +175,10 @@ class Vault:
         kind = classification.kind
 
         if kind is QueryKind.AUTHOR_FILTER and classification.author:
+            found = self._store.find_by_author(classification.author)
             return ListAnswer(
                 query=query,
-                reels=self._store.find_by_author(classification.author),
+                reels=found[: self._top_k[kind]],
                 author=classification.author,
             )
 

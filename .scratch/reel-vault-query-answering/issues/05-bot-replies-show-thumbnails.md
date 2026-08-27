@@ -6,9 +6,9 @@ Uses the durable `thumbnail_ref` (Telegram `file_id`) captured at save-time in t
 
 **Blocked by:** 01 (list reply formatting), 03 (aggregate reply formatting + matched links), 04 (`thumbnail_ref` must exist to render).
 
-- [ ] A `SingleItemAnswer` reply shows the reel's thumbnail alongside its link/collection/tags.
-- [ ] A `ListAnswer` reply shows each matched reel's thumbnail alongside its link.
-- [ ] An `AggregateAnswer` reply shows the synthesized text plus the matched reels with their thumbnails.
-- [ ] A reel with no `thumbnail_ref` (older save, or failed capture) renders as today's text-only reply without erroring.
-- [ ] Thumbnails are rendered by re-sending the stored Telegram `file_id` — no re-fetch of the original Instagram image at reply time.
+- [x] A `SingleItemAnswer` reply shows the reel's thumbnail alongside its link/collection/tags.
+- [x] A `ListAnswer` reply shows each matched reel's thumbnail alongside its link.
+- [x] An `AggregateAnswer` reply shows the synthesized text plus the matched reels with their thumbnails.
+- [x] A reel with no `thumbnail_ref` (older save, or failed capture) renders as today's text-only reply without erroring.
+- [x] Thumbnails are rendered by re-sending the stored Telegram `file_id` — no re-fetch of the original Instagram image at reply time.
 </content>
