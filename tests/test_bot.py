@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from reel_vault.bot import ReelVaultBot
-from reel_vault.models import Saved
+from reel_vault.models import UNCATEGORIZED, CollectionAssignment, Saved
 from tests.conftest import make_vault
 
 
@@ -92,6 +92,54 @@ async def test_unrecognized_instagram_link_gets_a_clear_reply_not_a_search(
     message.reply_text.assert_awaited_once()
     reply = message.reply_text.await_args.args[0]
     assert "vault" not in reply.lower()  # not the ask() "Nothing in the vault..." reply
+
+
+async def test_unsure_collection_asks_then_completes_the_save_on_reply(
+    bot: ReelVaultBot,
+) -> None:
+    bot._vault = make_vault(
+        captions={"https://instagram.com/reel/VAGUE": "5yrs ago this wasn't a thing"},
+        tags_by_caption={"5yrs ago this wasn't a thing": ["trend"]},
+        assignments={
+            "5yrs ago this wasn't a thing": CollectionAssignment(collection=UNCATEGORIZED)
+        },
+    )
+
+    first_message = _make_message("https://instagram.com/reel/VAGUE", chat_id=99)
+    await bot._on_message(_make_update(first_message, chat_id=99), MagicMock())
+    prompt = first_message.reply_text.await_args.args[0]
+    assert "not confident" in prompt.lower()
+    assert "vault" not in prompt.lower()  # not misrouted into ask()'s NoMatch reply
+
+    second_message = _make_message("Old Trends / Fashion", chat_id=99)
+    await bot._on_message(_make_update(second_message, chat_id=99), MagicMock())
+
+    reply = second_message.reply_text.await_args.args[0]
+    assert "Old Trends" in reply
+    assert "Fashion" in reply
+    assert "#trend" in reply
+
+    saved = bot._vault._store.find_by_url("https://instagram.com/reel/VAGUE")
+    assert saved is not None
+    assert saved.collection == "Old Trends"
+    assert saved.subcollection == "Fashion"
+
+
+async def test_skip_reply_leaves_the_reel_uncategorized(bot: ReelVaultBot) -> None:
+    bot._vault = make_vault(
+        captions={"https://instagram.com/reel/VAGUE2": "wait for it"},
+        assignments={"wait for it": CollectionAssignment(collection=UNCATEGORIZED)},
+    )
+
+    first_message = _make_message("https://instagram.com/reel/VAGUE2", chat_id=7)
+    await bot._on_message(_make_update(first_message, chat_id=7), MagicMock())
+
+    second_message = _make_message("skip", chat_id=7)
+    await bot._on_message(_make_update(second_message, chat_id=7), MagicMock())
+
+    saved = bot._vault._store.find_by_url("https://instagram.com/reel/VAGUE2")
+    assert saved is not None
+    assert saved.collection == UNCATEGORIZED
 
 
 async def test_plain_text_query_delegates_to_ask(bot: ReelVaultBot) -> None:

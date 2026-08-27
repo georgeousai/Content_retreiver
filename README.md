@@ -46,6 +46,8 @@ flowchart LR
 
 **Two layers of organization.** *Collections* are the browsing structure — exactly one per reel, optionally with a sub-collection (`AI › Interview Prep`). Before filing, the LLM is shown the collections that already exist and told to reuse one unless nothing fits, so the taxonomy stays tight instead of sprawling into `AI` / `Artificial Intelligence` / `AI Stuff`. *Tags* are the search surface — many per reel, freeform. They do different jobs, so the vault keeps both.
 
+**When the LLM isn't confident, it asks instead of guessing.** Some captions genuinely carry no topic (`"5 years ago this wasn't a thing"`) — the video's content may be entirely visual. Rather than silently filing those under an unrelated existing collection or a meaningless catch-all, the save pauses: the bot lists your existing collections and asks you to pick one (or name a new one, or reply `skip` to leave it Uncategorized). Nothing already computed — caption, tags, embedding, author — gets redone once you answer.
+
 **Asking.** You type a question into the same chat. The query gets embedded, matched against your stored reels by cosine similarity, and then — this is the interesting part — the LLM decides *what kind* of question you asked. Looking for one specific reel? You get its link and tags. Asking to pull something together across a topic? You get a synthesized answer built only from the captions of the reels that actually matched. You never pick a mode; it just works out which you meant.
 
 ---

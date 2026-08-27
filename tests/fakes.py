@@ -6,12 +6,7 @@ from __future__ import annotations
 import math
 import zlib
 
-from reel_vault.models import (
-    UNCATEGORIZED,
-    CollectionAssignment,
-    ExtractedPost,
-    SavedReel,
-)
+from reel_vault.models import CollectionAssignment, ExtractedPost, SavedReel
 from reel_vault.urls import normalize_reel_url
 
 
@@ -49,13 +44,20 @@ class FakeTagger:
 class FakeCollectionAssigner:
     """Deterministic assigner. Returns the caller-supplied assignment for a
     caption; otherwise reuses the first known collection whose name appears in
-    the caption, and falls back to UNCATEGORIZED. Records the `known` taxonomy
-    it was handed so tests can assert it is actually offered existing options."""
+    the caption, and falls back to a confident default collection (NOT
+    UNCATEGORIZED — tests that want to exercise the "assigner is unsure, ask
+    the user" path must opt in explicitly via `assignments`, since UNCATEGORIZED
+    is treated by `Vault` as "pause and ask", not a normal answer). Records the
+    `known` taxonomy it was handed so tests can assert it is actually offered
+    existing options."""
 
     def __init__(
-        self, assignments: dict[str, CollectionAssignment] | None = None
+        self,
+        assignments: dict[str, CollectionAssignment] | None = None,
+        default_collection: str = "General",
     ) -> None:
         self._assignments = assignments or {}
+        self._default_collection = default_collection
         self.seen_known: list[dict[str, list[str]]] = []
 
     def assign(self, caption: str, known: dict[str, list[str]]) -> CollectionAssignment:
@@ -67,7 +69,7 @@ class FakeCollectionAssigner:
         for collection in known:
             if collection.lower() in lowered:
                 return CollectionAssignment(collection=collection)
-        return CollectionAssignment(collection=UNCATEGORIZED)
+        return CollectionAssignment(collection=self._default_collection)
 
 
 class FakeEmbedder:

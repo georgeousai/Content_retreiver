@@ -9,11 +9,13 @@ Telegram, Groq, Postgres, or any other concrete integration.
 from __future__ import annotations
 
 from reel_vault.models import (
+    UNCATEGORIZED,
     AggregateAnswer,
     AlreadySaved,
     Answer,
     ExtractedPost,
     ExtractionFailed,
+    NeedsCollectionChoice,
     NoMatch,
     Saved,
     SavedReel,
@@ -75,10 +77,23 @@ class Vault:
             return ExtractionFailed(url=url)
 
         tags = self._tagger.tag(post.caption)
-        assignment = self._collection_assigner.assign(
-            post.caption, self._store.known_collections()
-        )
+        known = self._store.known_collections()
+        assignment = self._collection_assigner.assign(post.caption, known)
+        # Computed regardless of outcome so a follow-up `assign_collection`
+        # call never needs to re-tag or re-embed.
         embedding = self._embedder.embed(post.caption)
+
+        if assignment.collection == UNCATEGORIZED:
+            return NeedsCollectionChoice(
+                url=normalized,
+                caption=post.caption,
+                tags=tags,
+                embedding=embedding,
+                author_handle=post.author_handle,
+                author_name=post.author_name,
+                known_collections=known,
+            )
+
         reel = SavedReel(
             url=normalized,
             caption=post.caption,
@@ -88,6 +103,29 @@ class Vault:
             subcollection=assignment.subcollection,
             author_handle=post.author_handle,
             author_name=post.author_name,
+        )
+        self._store.save(reel)
+        return Saved(reel=reel)
+
+    def assign_collection(
+        self,
+        pending: NeedsCollectionChoice,
+        *,
+        collection: str,
+        subcollection: str | None = None,
+    ) -> Saved:
+        """Finish a save that `save_reel` paused on `NeedsCollectionChoice`,
+        now that the caller (the bot, having asked the user) supplies where
+        it belongs."""
+        reel = SavedReel(
+            url=pending.url,
+            caption=pending.caption,
+            tags=pending.tags,
+            embedding=pending.embedding,
+            collection=collection,
+            subcollection=subcollection,
+            author_handle=pending.author_handle,
+            author_name=pending.author_name,
         )
         self._store.save(reel)
         return Saved(reel=reel)

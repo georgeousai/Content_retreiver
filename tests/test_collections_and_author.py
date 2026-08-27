@@ -6,6 +6,7 @@ from reel_vault.models import (
     UNCATEGORIZED,
     CollectionAssignment,
     ExtractedPost,
+    NeedsCollectionChoice,
     Saved,
 )
 from tests.conftest import make_vault
@@ -79,7 +80,8 @@ def test_author_handle_and_name_are_stored_from_extraction() -> None:
                 author_handle="bashi_fuirkashi",
                 author_name="Bashiri Smith",
             )
-        }
+        },
+        assignments={"a caption": CollectionAssignment(collection="AI")},
     )
 
     result = vault.save_reel(URL)
@@ -90,7 +92,10 @@ def test_author_handle_and_name_are_stored_from_extraction() -> None:
 
 
 def test_author_is_absent_when_extraction_does_not_expose_it() -> None:
-    vault = make_vault(captions={URL: "a caption with no author"})
+    vault = make_vault(
+        captions={URL: "a caption with no author"},
+        assignments={"a caption with no author": CollectionAssignment(collection="AI")},
+    )
 
     result = vault.save_reel(URL)
 
@@ -112,10 +117,58 @@ def test_manually_pasted_caption_is_still_assigned_a_collection() -> None:
     assert result.reel.author_handle is None
 
 
-def test_unclassifiable_caption_falls_back_to_uncategorized() -> None:
-    vault = make_vault(captions={URL: "totally unclassifiable"})
+def test_unsure_assignment_pauses_the_save_and_asks_instead_of_guessing() -> None:
+    """An Uncategorized verdict from the assigner means 'I'm not confident' —
+    the save must pause rather than silently writing an unrelated guess."""
+    store = InMemoryReelStore()
+    vault = make_vault(
+        captions={URL: "totally unclassifiable"},
+        tags_by_caption={"totally unclassifiable": ["misc"]},
+        assignments={"totally unclassifiable": CollectionAssignment(collection=UNCATEGORIZED)},
+        store=store,
+    )
 
     result = vault.save_reel(URL)
 
+    assert isinstance(result, NeedsCollectionChoice)
+    assert result.url == URL
+    assert result.caption == "totally unclassifiable"
+    assert result.tags == ["misc"]
+    assert len(result.embedding) > 0
+    # Nothing was written — the row doesn't exist until the user decides.
+    assert store.find_by_url(URL) is None
+
+
+def test_assign_collection_finishes_the_save_without_recomputing_anything() -> None:
+    store = InMemoryReelStore()
+    vault = make_vault(
+        captions={URL: "totally unclassifiable"},
+        assignments={"totally unclassifiable": CollectionAssignment(collection=UNCATEGORIZED)},
+        store=store,
+    )
+
+    pending = vault.save_reel(URL)
+    assert isinstance(pending, NeedsCollectionChoice)
+
+    result = vault.assign_collection(pending, collection="Random Musings")
+
     assert isinstance(result, Saved)
-    assert result.reel.collection == UNCATEGORIZED
+    assert result.reel.collection == "Random Musings"
+    assert result.reel.subcollection is None
+    assert result.reel.caption == "totally unclassifiable"
+    assert store.find_by_url(URL) is not None
+
+
+def test_assign_collection_accepts_a_subcollection() -> None:
+    vault = make_vault(
+        captions={URL: "totally unclassifiable"},
+        assignments={"totally unclassifiable": CollectionAssignment(collection=UNCATEGORIZED)},
+    )
+    pending = vault.save_reel(URL)
+    assert isinstance(pending, NeedsCollectionChoice)
+
+    result = vault.assign_collection(pending, collection="AI", subcollection="Agents")
+
+    assert isinstance(result, Saved)
+    assert result.reel.collection == "AI"
+    assert result.reel.subcollection == "Agents"

@@ -9,9 +9,11 @@ from telegram import Message, Update
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
 from reel_vault.models import (
+    UNCATEGORIZED,
     AggregateAnswer,
     AlreadySaved,
     ExtractionFailed,
+    NeedsCollectionChoice,
     NoMatch,
     Saved,
     SavedReel,
@@ -38,6 +40,34 @@ def _format_location(reel: SavedReel) -> str:
     return reel.collection
 
 
+def _format_collection_prompt(known: dict[str, list[str]]) -> str:
+    if not known:
+        existing_line = "You have no collections yet — this will be the first."
+    else:
+        parts = [
+            f"{name} ({', '.join(subs)})" if subs else name
+            for name, subs in sorted(known.items())
+        ]
+        existing_line = "Existing: " + ", ".join(parts)
+
+    return (
+        "I'm not confident which collection this belongs in.\n"
+        f"{existing_line}\n\n"
+        "Reply with a collection name (new or existing). Add "
+        '"/ Subcollection" for a sub-collection, e.g. "AI / Interview Prep". '
+        'Reply "skip" to leave it Uncategorized.'
+    )
+
+
+def _parse_collection_reply(text: str) -> tuple[str, str | None]:
+    if text.strip().lower() == "skip":
+        return UNCATEGORIZED, None
+    if "/" in text:
+        collection, subcollection = text.split("/", 1)
+        return collection.strip(), subcollection.strip() or None
+    return text.strip(), None
+
+
 def _format_saved_reply(reel: SavedReel, *, already_saved: bool) -> str:
     tags_text = ", ".join(f"#{tag}" for tag in reel.tags) if reel.tags else "(no tags)"
     lines = [
@@ -54,6 +84,7 @@ class ReelVaultBot:
     def __init__(self, vault: Vault, token: str) -> None:
         self._vault = vault
         self._pending_manual_caption: dict[int, str] = {}
+        self._pending_collection_choice: dict[int, NeedsCollectionChoice] = {}
         self._app = Application.builder().token(token).build()
         self._app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_message))
 
@@ -76,6 +107,11 @@ class ReelVaultBot:
         pending_url = self._pending_manual_caption.pop(chat_id, None)
         if pending_url is not None:
             await self._handle_manual_caption(message, pending_url, text)
+            return
+
+        pending_choice = self._pending_collection_choice.pop(chat_id, None)
+        if pending_choice is not None:
+            await self._handle_collection_choice(message, pending_choice, text)
             return
 
         if INSTAGRAM_URL.search(text):
@@ -111,11 +147,23 @@ class ReelVaultBot:
 
         await self._reply_to_save_result(message, result)
 
+    async def _handle_collection_choice(
+        self, message: Message, pending: NeedsCollectionChoice, reply: str
+    ) -> None:
+        collection, subcollection = _parse_collection_reply(reply)
+        result = self._vault.assign_collection(
+            pending, collection=collection, subcollection=subcollection
+        )
+        await message.reply_text(_format_saved_reply(result.reel, already_saved=False))
+
     async def _reply_to_save_result(self, message: Message, result: SaveResult) -> None:
         if isinstance(result, Saved):
             await message.reply_text(_format_saved_reply(result.reel, already_saved=False))
         elif isinstance(result, AlreadySaved):
             await message.reply_text(_format_saved_reply(result.reel, already_saved=True))
+        elif isinstance(result, NeedsCollectionChoice):
+            self._pending_collection_choice[message.chat_id] = result
+            await message.reply_text(_format_collection_prompt(result.known_collections))
 
     async def _handle_query(self, message: Message, query: str) -> None:
         answer = self._vault.ask(query)

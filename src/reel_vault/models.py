@@ -61,7 +61,23 @@ class ExtractionFailed:
     url: str
 
 
-SaveResult = Saved | AlreadySaved | ExtractionFailed
+@dataclass(frozen=True)
+class NeedsCollectionChoice:
+    """The collection assigner wasn't confident enough to pick one on its
+    own. Everything already computed (caption, tags, embedding, author) is
+    carried here so finishing the save via `Vault.assign_collection` never
+    needs to re-fetch, re-tag, or re-embed."""
+
+    url: str
+    caption: str
+    tags: list[str]
+    embedding: list[float]
+    author_handle: str | None
+    author_name: str | None
+    known_collections: dict[str, list[str]]
+
+
+SaveResult = Saved | AlreadySaved | ExtractionFailed | NeedsCollectionChoice
 
 
 @dataclass(frozen=True)
