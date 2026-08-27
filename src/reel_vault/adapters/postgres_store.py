@@ -27,7 +27,8 @@ ALTER TABLE saved_reels
     ADD COLUMN IF NOT EXISTS collection TEXT NOT NULL DEFAULT '{UNCATEGORIZED}',
     ADD COLUMN IF NOT EXISTS subcollection TEXT,
     ADD COLUMN IF NOT EXISTS author_handle TEXT,
-    ADD COLUMN IF NOT EXISTS author_name TEXT;
+    ADD COLUMN IF NOT EXISTS author_name TEXT,
+    ADD COLUMN IF NOT EXISTS thumbnail_ref TEXT;
 
 CREATE INDEX IF NOT EXISTS saved_reels_collection_idx
     ON saved_reels (collection, subcollection);
@@ -36,7 +37,7 @@ CREATE INDEX IF NOT EXISTS saved_reels_author_idx ON saved_reels (author_handle)
 
 COLUMNS = (
     "normalized_url, caption, tags, embedding, collection, subcollection, "
-    "author_handle, author_name, saved_at"
+    "author_handle, author_name, thumbnail_ref, saved_at"
 )
 
 
@@ -56,7 +57,7 @@ class PostgresReelStore:
     def save(self, reel: SavedReel) -> None:
         self._conn.execute(
             f"INSERT INTO saved_reels ({COLUMNS}) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
             "ON CONFLICT (normalized_url) DO NOTHING",
             (
                 reel.url,
@@ -67,6 +68,7 @@ class PostgresReelStore:
                 reel.subcollection,
                 reel.author_handle,
                 reel.author_name,
+                reel.thumbnail_ref,
                 reel.saved_at,
             ),
         )
@@ -119,6 +121,7 @@ def _to_reel(row: tuple) -> SavedReel:
         subcollection,
         author_handle,
         author_name,
+        thumbnail_ref,
         saved_at,
     ) = row
     saved_at = saved_at if saved_at.tzinfo else saved_at.replace(tzinfo=timezone.utc)
@@ -131,6 +134,7 @@ def _to_reel(row: tuple) -> SavedReel:
         subcollection=subcollection,
         author_handle=author_handle,
         author_name=author_name,
+        thumbnail_ref=thumbnail_ref,
         saved_at=saved_at,
     )
 

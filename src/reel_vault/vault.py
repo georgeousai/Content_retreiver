@@ -8,6 +8,8 @@ Telegram, Groq, Postgres, or any other concrete integration.
 
 from __future__ import annotations
 
+import logging
+
 from reel_vault.models import (
     UNCATEGORIZED,
     AggregateAnswer,
@@ -33,8 +35,11 @@ from reel_vault.ports import (
     ReelStore,
     Summarizer,
     Tagger,
+    ThumbnailStore,
 )
 from reel_vault.urls import normalize_reel_url
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MATCH_THRESHOLD = 0.35
 
@@ -57,6 +62,7 @@ class Vault:
         store: ReelStore,
         query_intent: QueryIntent,
         summarizer: Summarizer,
+        thumbnail_store: ThumbnailStore | None = None,
         match_threshold: float = DEFAULT_MATCH_THRESHOLD,
         top_k_single: int = DEFAULT_TOP_K_SINGLE,
         top_k_list: int = DEFAULT_TOP_K_LIST,
@@ -69,6 +75,7 @@ class Vault:
         self._store = store
         self._query_intent = query_intent
         self._summarizer = summarizer
+        self._thumbnail_store = thumbnail_store
         self._match_threshold = match_threshold
         self._top_k = {
             QueryKind.SINGLE: top_k_single,
@@ -98,8 +105,9 @@ class Vault:
         known = self._store.known_collections()
         assignment = self._collection_assigner.assign(post.caption, known)
         # Computed regardless of outcome so a follow-up `assign_collection`
-        # call never needs to re-tag or re-embed.
+        # call never needs to re-tag, re-embed, or re-upload the thumbnail.
         embedding = self._embedder.embed(post.caption)
+        thumbnail_ref = self._capture_thumbnail(post.thumbnail_url)
 
         if assignment.collection == UNCATEGORIZED:
             return NeedsCollectionChoice(
@@ -110,6 +118,7 @@ class Vault:
                 author_handle=post.author_handle,
                 author_name=post.author_name,
                 known_collections=known,
+                thumbnail_ref=thumbnail_ref,
             )
 
         reel = SavedReel(
@@ -121,6 +130,7 @@ class Vault:
             subcollection=assignment.subcollection,
             author_handle=post.author_handle,
             author_name=post.author_name,
+            thumbnail_ref=thumbnail_ref,
         )
         self._store.save(reel)
         return Saved(reel=reel)
@@ -144,9 +154,21 @@ class Vault:
             subcollection=subcollection,
             author_handle=pending.author_handle,
             author_name=pending.author_name,
+            thumbnail_ref=pending.thumbnail_ref,
         )
         self._store.save(reel)
         return Saved(reel=reel)
+
+    def _capture_thumbnail(self, thumbnail_url: str | None) -> str | None:
+        """A thumbnail is a nicety; the saved reel is the point. Anything the
+        store throws is logged and dropped rather than losing the save."""
+        if thumbnail_url is None or self._thumbnail_store is None:
+            return None
+        try:
+            return self._thumbnail_store.store(thumbnail_url)
+        except Exception:
+            logger.warning("Could not store thumbnail %s", thumbnail_url, exc_info=True)
+            return None
 
     def ask(self, query: str) -> Answer:
         classification = self._query_intent.classify(query)

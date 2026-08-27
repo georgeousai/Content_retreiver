@@ -20,6 +20,7 @@ from reel_vault.adapters.groq_llm import (
     GroqTagger,
 )
 from reel_vault.adapters.postgres_store import PostgresReelStore
+from reel_vault.adapters.thumbnail import TelegramThumbnailStore
 from reel_vault.bot import build_bot
 from reel_vault.config import load_config
 from reel_vault.vault import Vault
@@ -31,6 +32,16 @@ def main() -> None:
 
     groq_client = Groq(api_key=config.groq_api_key)
 
+    thumbnail_store = (
+        TelegramThumbnailStore(config.telegram_bot_token, config.thumbnail_chat_id)
+        if config.thumbnail_chat_id
+        else None
+    )
+    if thumbnail_store is None:
+        logging.info(
+            "TELEGRAM_THUMBNAIL_CHAT_ID is not set — reels will save without thumbnails."
+        )
+
     vault = Vault(
         caption_fetcher=CompositeCaptionFetcher(
             [OEmbedCaptionFetcher(), YtDlpCaptionFetcher()]
@@ -41,6 +52,7 @@ def main() -> None:
         store=PostgresReelStore(config.database_url),
         query_intent=GroqQueryIntent(client=groq_client),
         summarizer=GroqSummarizer(client=groq_client),
+        thumbnail_store=thumbnail_store,
     )
 
     bot = build_bot(vault, config.telegram_bot_token)

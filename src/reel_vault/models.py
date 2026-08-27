@@ -11,12 +11,14 @@ UNCATEGORIZED = "Uncategorized"
 
 @dataclass(frozen=True)
 class ExtractedPost:
-    """What a `CaptionFetcher` recovers from a URL. Author fields are optional
-    because not every extraction route exposes them (oEmbed, manual paste)."""
+    """What a `CaptionFetcher` recovers from a URL. Author and thumbnail fields
+    are optional because not every extraction route exposes them (oEmbed,
+    manual paste)."""
 
     caption: str
     author_handle: str | None = None
     author_name: str | None = None
+    thumbnail_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -38,6 +40,9 @@ class SavedReel:
     subcollection: str | None = None
     author_handle: str | None = None
     author_name: str | None = None
+    # A reference we control and that does not expire — not the extracted
+    # CDN URL, which is signed and eventually 404s.
+    thumbnail_ref: str | None = None
     saved_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -76,6 +81,7 @@ class NeedsCollectionChoice:
     author_handle: str | None
     author_name: str | None
     known_collections: dict[str, list[str]]
+    thumbnail_ref: str | None = None
 
 
 SaveResult = Saved | AlreadySaved | ExtractionFailed | NeedsCollectionChoice

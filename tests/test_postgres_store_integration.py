@@ -70,6 +70,7 @@ def _reel(
     subcollection: str | None = None,
     author_handle: str | None = None,
     author_name: str | None = None,
+    thumbnail_ref: str | None = None,
 ) -> SavedReel:
     return SavedReel(
         url=url,
@@ -80,6 +81,7 @@ def _reel(
         subcollection=subcollection,
         author_handle=author_handle,
         author_name=author_name,
+        thumbnail_ref=thumbnail_ref,
     )
 
 
@@ -99,6 +101,7 @@ def test_save_then_find_round_trips_all_fields(store) -> None:
             subcollection="RAG",
             author_handle="someone",
             author_name="Some One",
+            thumbnail_ref="AgACAgQAAx-file-id",
         )
     )
 
@@ -111,6 +114,7 @@ def test_save_then_find_round_trips_all_fields(store) -> None:
     assert found.subcollection == "RAG"
     assert found.author_handle == "someone"
     assert found.author_name == "Some One"
+    assert found.thumbnail_ref == "AgACAgQAAx-file-id"
     assert len(found.embedding) == 384
     assert found.embedding == pytest.approx(embedding, abs=1e-6)
 

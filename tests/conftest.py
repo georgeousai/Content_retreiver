@@ -13,6 +13,7 @@ from tests.fakes import (
     FakeQueryIntent,
     FakeSummarizer,
     FakeTagger,
+    FakeThumbnailStore,
     InMemoryReelStore,
 )
 
@@ -32,6 +33,7 @@ def make_vault(
     summarizer: FakeSummarizer | None = None,
     embedder: FakeEmbedder | None = None,
     query_intent: FakeQueryIntent | None = None,
+    thumbnail_store: FakeThumbnailStore | None = None,
     aggregate_triggers: tuple[str, ...] = ("give me all", "summarize", "every"),
     match_threshold: float = 0.1,
     **top_k_overrides: int,
@@ -52,6 +54,7 @@ def make_vault(
             else FakeQueryIntent(aggregate_triggers)
         ),
         summarizer=summarizer if summarizer is not None else FakeSummarizer(),
+        thumbnail_store=thumbnail_store,
         match_threshold=match_threshold,
         **top_k_overrides,
     )

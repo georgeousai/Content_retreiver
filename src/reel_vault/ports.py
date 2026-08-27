@@ -38,6 +38,14 @@ class CollectionAssigner(Protocol):
         ...
 
 
+class ThumbnailStore(Protocol):
+    def store(self, thumbnail_url: str) -> str | None:
+        """Take a (typically expiring) image URL and return a durable
+        reference we can render from later, or None if it couldn't be
+        stored."""
+        ...
+
+
 class Embedder(Protocol):
     def embed(self, text: str) -> list[float]:
         ...
