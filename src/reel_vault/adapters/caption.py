@@ -1,6 +1,6 @@
 """Caption extraction: Instagram's oEmbed endpoint first, falling back to an
-unofficial `yt-dlp`-based scrape (caption/description text only — no
-video/audio is ever downloaded) if oEmbed fails or returns an unusable
+unofficial `yt-dlp`-based scrape (caption/description and author text only —
+no video/audio is ever downloaded) if oEmbed fails or returns an unusable
 caption."""
 
 from __future__ import annotations
@@ -8,6 +8,8 @@ from __future__ import annotations
 import logging
 
 import httpx
+
+from reel_vault.models import ExtractedPost
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +29,7 @@ class OEmbedCaptionFetcher:
     def __init__(self, *, timeout: float = 10.0) -> None:
         self._timeout = timeout
 
-    def fetch(self, url: str) -> str | None:
+    def fetch(self, url: str) -> ExtractedPost | None:
         try:
             response = httpx.get(
                 OEMBED_URL, params={"url": url}, timeout=self._timeout
@@ -39,14 +41,20 @@ class OEmbedCaptionFetcher:
 
         data = response.json()
         caption = data.get("title")
-        return caption if _usable(caption) else None
+        if not isinstance(caption, str) or not _usable(caption):
+            return None
+        return ExtractedPost(
+            caption=caption,
+            author_handle=data.get("author_name"),
+            author_name=data.get("author_name"),
+        )
 
 
 class YtDlpCaptionFetcher:
-    """Extracts only the post description/caption via yt-dlp's metadata
-    extraction — `download=False`, no media is ever fetched."""
+    """Extracts only the post description/caption and author via yt-dlp's
+    metadata extraction — `download=False`, no media is ever fetched."""
 
-    def fetch(self, url: str) -> str | None:
+    def fetch(self, url: str) -> ExtractedPost | None:
         try:
             import yt_dlp
         except ImportError:  # pragma: no cover - dependency is always installed
@@ -61,19 +69,28 @@ class YtDlpCaptionFetcher:
             logger.info("yt-dlp fetch failed for %s: %s", url, exc)
             return None
 
-        caption = (info or {}).get("description")
-        return caption if _usable(caption) else None
+        info = info or {}
+        caption = info.get("description")
+        if not isinstance(caption, str) or not _usable(caption):
+            return None
+        return ExtractedPost(
+            caption=caption,
+            # `channel` is the @handle (e.g. "bashi_fuirkashi"); `uploader` is
+            # the display name (e.g. "Bashiri Smith").
+            author_handle=info.get("channel") or info.get("uploader_id"),
+            author_name=info.get("uploader"),
+        )
 
 
 class CompositeCaptionFetcher:
-    """Tries each fetcher in order, returning the first usable caption."""
+    """Tries each fetcher in order, returning the first usable result."""
 
     def __init__(self, fetchers: list) -> None:
         self._fetchers = fetchers
 
-    def fetch(self, url: str) -> str | None:
+    def fetch(self, url: str) -> ExtractedPost | None:
         for fetcher in self._fetchers:
-            caption = fetcher.fetch(url)
-            if _usable(caption):
-                return caption
+            post = fetcher.fetch(url)
+            if post is not None and _usable(post.caption):
+                return post
         return None

@@ -7,18 +7,28 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from reel_vault.models import SavedReel
+from reel_vault.models import CollectionAssignment, ExtractedPost, SavedReel
 
 
 class CaptionFetcher(Protocol):
-    def fetch(self, url: str) -> str | None:
-        """Return the reel's caption, or None if it could not be extracted."""
+    def fetch(self, url: str) -> ExtractedPost | None:
+        """Return the post's caption and author, or None if not extractable."""
         ...
 
 
 class Tagger(Protocol):
     def tag(self, caption: str) -> list[str]:
         """Return zero or more open-vocabulary topic tags for a caption."""
+        ...
+
+
+class CollectionAssigner(Protocol):
+    def assign(
+        self, caption: str, known: dict[str, list[str]]
+    ) -> CollectionAssignment:
+        """Place a caption in the taxonomy. `known` maps each existing
+        collection to its existing sub-collections, so implementations can
+        reuse what is already there instead of coining near-duplicates."""
         ...
 
 
@@ -32,6 +42,11 @@ class ReelStore(Protocol):
         ...
 
     def save(self, reel: SavedReel) -> None:
+        ...
+
+    def known_collections(self) -> dict[str, list[str]]:
+        """Every collection currently in the vault, mapped to its
+        sub-collections. Feeds the `CollectionAssigner`."""
         ...
 
     def search(

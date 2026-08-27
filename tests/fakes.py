@@ -4,19 +4,32 @@ per the spec's testing decisions (tests target the seam, not the adapters)."""
 from __future__ import annotations
 
 import math
+import zlib
 
-from reel_vault.models import SavedReel
+from reel_vault.models import (
+    UNCATEGORIZED,
+    CollectionAssignment,
+    ExtractedPost,
+    SavedReel,
+)
 from reel_vault.urls import normalize_reel_url
 
 
 class FakeCaptionFetcher:
-    """Maps URL -> caption. A missing/None entry simulates extraction failure."""
+    """Maps URL -> ExtractedPost. A missing/None entry simulates extraction
+    failure. Plain strings are accepted as a shorthand for a caption with no
+    author attached."""
 
-    def __init__(self, captions: dict[str, str | None]) -> None:
-        self._captions = captions
+    def __init__(self, posts: dict[str, ExtractedPost | str | None]) -> None:
+        self._posts = posts
 
-    def fetch(self, url: str) -> str | None:
-        return self._captions.get(url)
+    def fetch(self, url: str) -> ExtractedPost | None:
+        post = self._posts.get(url)
+        if post is None:
+            return None
+        if isinstance(post, str):
+            return ExtractedPost(caption=post)
+        return post
 
 
 class FakeTagger:
@@ -33,18 +46,47 @@ class FakeTagger:
         return [first_word]
 
 
+class FakeCollectionAssigner:
+    """Deterministic assigner. Returns the caller-supplied assignment for a
+    caption; otherwise reuses the first known collection whose name appears in
+    the caption, and falls back to UNCATEGORIZED. Records the `known` taxonomy
+    it was handed so tests can assert it is actually offered existing options."""
+
+    def __init__(
+        self, assignments: dict[str, CollectionAssignment] | None = None
+    ) -> None:
+        self._assignments = assignments or {}
+        self.seen_known: list[dict[str, list[str]]] = []
+
+    def assign(self, caption: str, known: dict[str, list[str]]) -> CollectionAssignment:
+        self.seen_known.append(known)
+        if caption in self._assignments:
+            return self._assignments[caption]
+
+        lowered = caption.lower()
+        for collection in known:
+            if collection.lower() in lowered:
+                return CollectionAssignment(collection=collection)
+        return CollectionAssignment(collection=UNCATEGORIZED)
+
+
 class FakeEmbedder:
     """Deterministic bag-of-words embedding: cosine similarity between two
     texts reflects shared-word overlap, which is enough to exercise search
-    ranking/thresholding without a real model."""
+    ranking/thresholding without a real model.
 
-    def __init__(self, dim: int = 64) -> None:
+    Uses crc32 rather than the builtin `hash`, which is salted per process
+    (PYTHONHASHSEED) and would make word->dimension mapping — and therefore
+    every similarity score — differ between runs.
+    """
+
+    def __init__(self, dim: int = 256) -> None:
         self._dim = dim
 
     def embed(self, text: str) -> list[float]:
         vec = [0.0] * self._dim
         for word in text.lower().split():
-            vec[hash(word) % self._dim] += 1.0
+            vec[zlib.crc32(word.encode()) % self._dim] += 1.0
         norm = math.sqrt(sum(v * v for v in vec)) or 1.0
         return [v / norm for v in vec]
 
@@ -58,6 +100,14 @@ class InMemoryReelStore:
 
     def save(self, reel: SavedReel) -> None:
         self._by_url[normalize_reel_url(reel.url)] = reel
+
+    def known_collections(self) -> dict[str, list[str]]:
+        known: dict[str, list[str]] = {}
+        for reel in self._by_url.values():
+            subs = known.setdefault(reel.collection, [])
+            if reel.subcollection and reel.subcollection not in subs:
+                subs.append(reel.subcollection)
+        return known
 
     def search(
         self, query_embedding: list[float], top_k: int

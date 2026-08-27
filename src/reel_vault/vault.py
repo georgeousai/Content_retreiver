@@ -12,6 +12,7 @@ from reel_vault.models import (
     AggregateAnswer,
     AlreadySaved,
     Answer,
+    ExtractedPost,
     ExtractionFailed,
     NoMatch,
     Saved,
@@ -21,6 +22,7 @@ from reel_vault.models import (
 )
 from reel_vault.ports import (
     CaptionFetcher,
+    CollectionAssigner,
     Embedder,
     QueryIntent,
     ReelStore,
@@ -39,6 +41,7 @@ class Vault:
         *,
         caption_fetcher: CaptionFetcher,
         tagger: Tagger,
+        collection_assigner: CollectionAssigner,
         embedder: Embedder,
         store: ReelStore,
         query_intent: QueryIntent,
@@ -48,6 +51,7 @@ class Vault:
     ) -> None:
         self._caption_fetcher = caption_fetcher
         self._tagger = tagger
+        self._collection_assigner = collection_assigner
         self._embedder = embedder
         self._store = store
         self._query_intent = query_intent
@@ -62,17 +66,28 @@ class Vault:
         if existing is not None:
             return AlreadySaved(reel=existing)
 
-        caption = manual_caption if manual_caption is not None else self._caption_fetcher.fetch(url)
-        if not caption or not caption.strip():
+        post = (
+            ExtractedPost(caption=manual_caption)
+            if manual_caption is not None
+            else self._caption_fetcher.fetch(url)
+        )
+        if post is None or not post.caption.strip():
             return ExtractionFailed(url=url)
 
-        tags = self._tagger.tag(caption)
-        embedding = self._embedder.embed(caption)
+        tags = self._tagger.tag(post.caption)
+        assignment = self._collection_assigner.assign(
+            post.caption, self._store.known_collections()
+        )
+        embedding = self._embedder.embed(post.caption)
         reel = SavedReel(
             url=normalized,
-            caption=caption,
+            caption=post.caption,
             tags=tags,
             embedding=embedding,
+            collection=assignment.collection,
+            subcollection=assignment.subcollection,
+            author_handle=post.author_handle,
+            author_name=post.author_name,
         )
         self._store.save(reel)
         return Saved(reel=reel)

@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterable
 
 from groq import Groq
+
+from reel_vault.models import UNCATEGORIZED, CollectionAssignment
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +43,22 @@ SUMMARY_SYSTEM_PROMPT = (
     "You answer a user's question using ONLY the provided captions from their "
     "saved reels. Synthesize a concise answer grounded in that content. Do not "
     "invent information not present in the captions."
+)
+
+COLLECTION_SYSTEM_PROMPT = (
+    "You file a saved social-media post into a personal library. You are given "
+    "the post's caption and the library's EXISTING collections (each with its "
+    "existing sub-collections).\n\n"
+    "Rules:\n"
+    "1. STRONGLY prefer reusing an existing collection. Only invent a new one "
+    "if the caption genuinely does not belong in any of them.\n"
+    "2. Reuse an existing sub-collection where one fits. A sub-collection is "
+    "optional — use null when the collection alone is specific enough.\n"
+    "3. Collection names are short Title Case noun phrases (e.g. \"AI\", "
+    "\"Fitness\", \"Personal Finance\").\n"
+    "4. Never rename or re-word an existing collection: copy it exactly.\n\n"
+    'Reply with ONLY a JSON object: {"collection": "...", "subcollection": '
+    '"..." or null}'
 )
 
 
@@ -78,6 +97,21 @@ class GroqQueryIntent(_GroqChatAdapter):
         return "AGGREGATE" in content.strip().upper()
 
 
+class GroqCollectionAssigner(_GroqChatAdapter):
+    def assign(
+        self, caption: str, known: dict[str, list[str]]
+    ) -> CollectionAssignment:
+        known_block = (
+            json.dumps(known, indent=2) if known else "(none yet — this is the first post)"
+        )
+        content = self._complete(
+            system_prompt=COLLECTION_SYSTEM_PROMPT,
+            user_content=f"Existing collections:\n{known_block}\n\nCaption:\n{caption}",
+            temperature=0.0,
+        )
+        return _parse_assignment(content, known)
+
+
 class GroqSummarizer(_GroqChatAdapter):
     def summarize(self, query: str, captions: list[str]) -> str:
         captions_block = "\n\n".join(f"- {caption}" for caption in captions)
@@ -85,6 +119,36 @@ class GroqSummarizer(_GroqChatAdapter):
         return self._complete(
             system_prompt=SUMMARY_SYSTEM_PROMPT, user_content=user_content, temperature=0.3
         )
+
+
+def _parse_assignment(content: str, known: dict[str, list[str]]) -> CollectionAssignment:
+    """Parse the model's JSON, then snap near-miss names back onto existing
+    collections so casing/whitespace drift can't fork a duplicate collection."""
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        logger.warning("Collection assigner returned non-JSON content: %r", content)
+        return CollectionAssignment(collection=UNCATEGORIZED)
+
+    if not isinstance(parsed, dict):
+        return CollectionAssignment(collection=UNCATEGORIZED)
+
+    collection = str(parsed.get("collection") or "").strip() or UNCATEGORIZED
+    raw_sub = parsed.get("subcollection")
+    subcollection = str(raw_sub).strip() if raw_sub else None
+
+    collection = _canonicalize(collection, known.keys())
+    if subcollection:
+        subcollection = _canonicalize(subcollection, known.get(collection, []))
+    return CollectionAssignment(collection=collection, subcollection=subcollection)
+
+
+def _canonicalize(name: str, existing: Iterable[str]) -> str:
+    """Return the existing spelling of `name` if one matches case-insensitively."""
+    for candidate in existing:
+        if candidate.casefold() == name.casefold():
+            return candidate
+    return name
 
 
 def _parse_tag_list(content: str) -> list[str]:

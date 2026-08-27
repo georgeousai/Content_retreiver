@@ -25,11 +25,22 @@ INSTAGRAM_REEL_URL = re.compile(
 )
 
 
+def _format_location(reel: SavedReel) -> str:
+    if reel.subcollection:
+        return f"{reel.collection} › {reel.subcollection}"
+    return reel.collection
+
+
 def _format_saved_reply(reel: SavedReel, *, already_saved: bool) -> str:
     tags_text = ", ".join(f"#{tag}" for tag in reel.tags) if reel.tags else "(no tags)"
-    if already_saved:
-        return f"Already saved that one. Tags: {tags_text}"
-    return f"Saved! Tags: {tags_text}"
+    lines = [
+        "Already saved that one." if already_saved else "Saved!",
+        f"📁 {_format_location(reel)}",
+        f"🏷️ {tags_text}",
+    ]
+    if reel.author_handle:
+        lines.append(f"👤 @{reel.author_handle}")
+    return "\n".join(lines)
 
 
 class ReelVaultBot:
@@ -94,8 +105,12 @@ class ReelVaultBot:
         answer = self._vault.ask(query)
 
         if isinstance(answer, SingleItemAnswer):
-            tags_text = ", ".join(f"#{tag}" for tag in answer.reel.tags)
-            await message.reply_text(f"{answer.reel.url}\nTags: {tags_text}")
+            reel = answer.reel
+            tags_text = ", ".join(f"#{tag}" for tag in reel.tags)
+            lines = [reel.url, f"📁 {_format_location(reel)}", f"🏷️ {tags_text}"]
+            if reel.author_handle:
+                lines.append(f"👤 @{reel.author_handle}")
+            await message.reply_text("\n".join(lines))
         elif isinstance(answer, AggregateAnswer):
             await message.reply_text(answer.text)
         elif isinstance(answer, NoMatch):

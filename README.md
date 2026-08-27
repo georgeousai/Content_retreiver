@@ -25,8 +25,9 @@ flowchart LR
     A["📱 Instagram<br/>share sheet"] --> B["💬 Telegram bot"]
     B --> C{"save_reel(url)"}
 
-    C --> D["Caption<br/>extraction"]
-    D --> E["🏷️ Tagging<br/>(Groq LLM)"]
+    C --> D["Caption + author<br/>extraction"]
+    D --> D2["📁 Collection<br/>(reuses existing)"]
+    D2 --> E["🏷️ Tagging<br/>(Groq LLM)"]
     E --> F["🧮 Embedding<br/>(local, CPU)"]
     F --> G[("🗄️ Postgres<br/>+ pgvector")]
     G --> B
@@ -41,7 +42,9 @@ flowchart LR
     L --> B
 ```
 
-**Saving.** You share a Reel from Instagram's native share sheet to your Telegram bot — one tap, no app switching. The bot extracts the caption, sends it to an LLM for open-vocabulary topic tags (no fixed folder list, a reel can carry many tags), generates an embedding locally on your CPU, and stores one row. Share the same link twice and it tells you it's already saved instead of duplicating it.
+**Saving.** You share a Reel from Instagram's native share sheet to your Telegram bot — one tap, no app switching. The bot extracts the caption and the creator's handle, files it into a collection (and sub-collection, when one fits), sends it to an LLM for open-vocabulary topic tags, generates an embedding locally on your CPU, and stores one row. Share the same link twice and it tells you it's already saved instead of duplicating it.
+
+**Two layers of organization.** *Collections* are the browsing structure — exactly one per reel, optionally with a sub-collection (`AI › Interview Prep`). Before filing, the LLM is shown the collections that already exist and told to reuse one unless nothing fits, so the taxonomy stays tight instead of sprawling into `AI` / `Artificial Intelligence` / `AI Stuff`. *Tags* are the search surface — many per reel, freeform. They do different jobs, so the vault keeps both.
 
 **Asking.** You type a question into the same chat. The query gets embedded, matched against your stored reels by cosine similarity, and then — this is the interesting part — the LLM decides *what kind* of question you asked. Looking for one specific reel? You get its link and tags. Asking to pull something together across a topic? You get a synthesized answer built only from the captions of the reels that actually matched. You never pick a mode; it just works out which you meant.
 

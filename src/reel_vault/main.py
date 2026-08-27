@@ -13,7 +13,12 @@ from reel_vault.adapters.caption import (
     YtDlpCaptionFetcher,
 )
 from reel_vault.adapters.embedder import LocalEmbedder
-from reel_vault.adapters.groq_llm import GroqQueryIntent, GroqSummarizer, GroqTagger
+from reel_vault.adapters.groq_llm import (
+    GroqCollectionAssigner,
+    GroqQueryIntent,
+    GroqSummarizer,
+    GroqTagger,
+)
 from reel_vault.adapters.postgres_store import PostgresReelStore
 from reel_vault.bot import build_bot
 from reel_vault.config import load_config
@@ -31,6 +36,7 @@ def main() -> None:
             [OEmbedCaptionFetcher(), YtDlpCaptionFetcher()]
         ),
         tagger=GroqTagger(client=groq_client),
+        collection_assigner=GroqCollectionAssigner(client=groq_client),
         embedder=LocalEmbedder(),
         store=PostgresReelStore(config.database_url),
         query_intent=GroqQueryIntent(client=groq_client),

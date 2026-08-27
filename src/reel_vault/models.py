@@ -5,6 +5,27 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+UNCATEGORIZED = "Uncategorized"
+
+
+@dataclass(frozen=True)
+class ExtractedPost:
+    """What a `CaptionFetcher` recovers from a URL. Author fields are optional
+    because not every extraction route exposes them (oEmbed, manual paste)."""
+
+    caption: str
+    author_handle: str | None = None
+    author_name: str | None = None
+
+
+@dataclass(frozen=True)
+class CollectionAssignment:
+    """Where a reel belongs in the browsing taxonomy: exactly one collection,
+    plus an optional finer-grained sub-collection."""
+
+    collection: str
+    subcollection: str | None = None
+
 
 @dataclass(frozen=True)
 class SavedReel:
@@ -12,6 +33,10 @@ class SavedReel:
     caption: str
     tags: list[str]
     embedding: list[float]
+    collection: str = UNCATEGORIZED
+    subcollection: str | None = None
+    author_handle: str | None = None
+    author_name: str | None = None
     saved_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 

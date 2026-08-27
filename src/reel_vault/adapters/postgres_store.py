@@ -9,19 +9,35 @@ import psycopg
 from pgvector import Vector
 from pgvector.psycopg import register_vector
 
-from reel_vault.models import SavedReel
+from reel_vault.models import UNCATEGORIZED, SavedReel
 
-SCHEMA = """
+SCHEMA = f"""
 CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TABLE IF NOT EXISTS saved_reels (
     normalized_url TEXT PRIMARY KEY,
     caption TEXT NOT NULL,
-    tags TEXT[] NOT NULL DEFAULT '{}',
+    tags TEXT[] NOT NULL DEFAULT '{{}}',
     embedding VECTOR(384) NOT NULL,
     saved_at TIMESTAMPTZ NOT NULL
 );
+
+-- Added after the first release; ALTERs keep existing vaults working.
+ALTER TABLE saved_reels
+    ADD COLUMN IF NOT EXISTS collection TEXT NOT NULL DEFAULT '{UNCATEGORIZED}',
+    ADD COLUMN IF NOT EXISTS subcollection TEXT,
+    ADD COLUMN IF NOT EXISTS author_handle TEXT,
+    ADD COLUMN IF NOT EXISTS author_name TEXT;
+
+CREATE INDEX IF NOT EXISTS saved_reels_collection_idx
+    ON saved_reels (collection, subcollection);
+CREATE INDEX IF NOT EXISTS saved_reels_author_idx ON saved_reels (author_handle);
 """
+
+COLUMNS = (
+    "normalized_url, caption, tags, embedding, collection, subcollection, "
+    "author_handle, author_name, saved_at"
+)
 
 
 class PostgresReelStore:
@@ -32,19 +48,41 @@ class PostgresReelStore:
 
     def find_by_url(self, normalized_url: str) -> SavedReel | None:
         row = self._conn.execute(
-            "SELECT normalized_url, caption, tags, embedding, saved_at "
-            "FROM saved_reels WHERE normalized_url = %s",
+            f"SELECT {COLUMNS} FROM saved_reels WHERE normalized_url = %s",
             (normalized_url,),
         ).fetchone()
         return _to_reel(row) if row else None
 
     def save(self, reel: SavedReel) -> None:
         self._conn.execute(
-            "INSERT INTO saved_reels (normalized_url, caption, tags, embedding, saved_at) "
-            "VALUES (%s, %s, %s, %s, %s) "
+            f"INSERT INTO saved_reels ({COLUMNS}) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
             "ON CONFLICT (normalized_url) DO NOTHING",
-            (reel.url, reel.caption, reel.tags, Vector(reel.embedding), reel.saved_at),
+            (
+                reel.url,
+                reel.caption,
+                reel.tags,
+                Vector(reel.embedding),
+                reel.collection,
+                reel.subcollection,
+                reel.author_handle,
+                reel.author_name,
+                reel.saved_at,
+            ),
         )
+
+    def known_collections(self) -> dict[str, list[str]]:
+        rows = self._conn.execute(
+            "SELECT collection, subcollection FROM saved_reels "
+            "GROUP BY collection, subcollection ORDER BY collection, subcollection"
+        ).fetchall()
+
+        known: dict[str, list[str]] = {}
+        for collection, subcollection in rows:
+            subs = known.setdefault(collection, [])
+            if subcollection and subcollection not in subs:
+                subs.append(subcollection)
+        return known
 
     def search(
         self, query_embedding: list[float], top_k: int
@@ -54,8 +92,7 @@ class PostgresReelStore:
         # operator.
         vector = Vector(query_embedding)
         rows = self._conn.execute(
-            "SELECT normalized_url, caption, tags, embedding, saved_at, "
-            "1 - (embedding <=> %s) AS similarity "
+            f"SELECT {COLUMNS}, 1 - (embedding <=> %s) AS similarity "
             "FROM saved_reels ORDER BY embedding <=> %s LIMIT %s",
             (vector, vector, top_k),
         ).fetchall()
@@ -63,13 +100,27 @@ class PostgresReelStore:
 
 
 def _to_reel(row: tuple) -> SavedReel:
-    normalized_url, caption, tags, embedding, saved_at = row
+    (
+        normalized_url,
+        caption,
+        tags,
+        embedding,
+        collection,
+        subcollection,
+        author_handle,
+        author_name,
+        saved_at,
+    ) = row
     saved_at = saved_at if saved_at.tzinfo else saved_at.replace(tzinfo=timezone.utc)
     return SavedReel(
         url=normalized_url,
         caption=caption,
         tags=list(tags),
         embedding=_to_float_list(embedding),
+        collection=collection,
+        subcollection=subcollection,
+        author_handle=author_handle,
+        author_name=author_name,
         saved_at=saved_at,
     )
 
