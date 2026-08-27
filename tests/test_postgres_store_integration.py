@@ -180,6 +180,16 @@ def test_find_by_author_matches_handle_or_display_name_case_insensitively(store)
     assert [r.url for r in store.find_by_author(f"@{handle}")] == [by_handle]
 
 
+def test_set_thumbnail_ref_attaches_a_picture_to_an_existing_reel(store) -> None:
+    url = _unique_url()
+    store.save(_reel(url, embedding=[0.5] * 384))
+    assert store.find_by_url(url).thumbnail_ref is None
+
+    store.set_thumbnail_ref(url, "AgACAgQAAx-file-id")
+
+    assert store.find_by_url(url).thumbnail_ref == "AgACAgQAAx-file-id"
+
+
 def test_find_by_author_returns_empty_for_an_unknown_creator(store) -> None:
     assert store.find_by_author(f"nobody_{uuid.uuid4().hex[:8]}") == []
 

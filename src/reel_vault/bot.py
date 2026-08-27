@@ -3,9 +3,11 @@ and relays their results as chat replies — no vault logic lives here."""
 
 from __future__ import annotations
 
+import logging
 import re
 
 from telegram import InputMediaPhoto, Message, Update
+from telegram.error import TelegramError
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
 from reel_vault.models import (
@@ -22,6 +24,8 @@ from reel_vault.models import (
     SingleItemAnswer,
 )
 from reel_vault.vault import Vault
+
+logger = logging.getLogger(__name__)
 
 INSTAGRAM_REEL_URL = re.compile(
     # Instagram's generic /p/ permalink covers photos, carousels, AND
@@ -190,12 +194,37 @@ class ReelVaultBot:
 
     async def _reply_to_save_result(self, message: Message, result: SaveResult) -> None:
         if isinstance(result, Saved):
-            await message.reply_text(_format_saved_reply(result.reel, already_saved=False))
+            await self._confirm_save(message, result)
         elif isinstance(result, AlreadySaved):
             await message.reply_text(_format_saved_reply(result.reel, already_saved=True))
         elif isinstance(result, NeedsCollectionChoice):
             self._pending_collection_choice[message.chat_id] = result
             await message.reply_text(_format_collection_prompt(result.known_collections))
+
+    async def _confirm_save(self, message: Message, result: Saved) -> None:
+        """Confirm the save with the reel's own picture where there is one.
+
+        The confirmation doubles as the upload that mints a Telegram file_id:
+        Telegram fetches the (expiring) Instagram URL server-side, and the
+        file_id it returns never expires, so every later reply can show the
+        picture for free. One message, no clutter, nothing for the user to
+        configure.
+        """
+        text = _format_saved_reply(result.reel, already_saved=False)
+        if not result.thumbnail_url:
+            await message.reply_text(text)
+            return
+
+        try:
+            sent = await message.reply_photo(photo=result.thumbnail_url, caption=text)
+        except TelegramError as exc:
+            # A picture is a nicety; the reel is already saved either way.
+            logger.info("Could not send thumbnail for %s: %s", result.reel.url, exc)
+            await message.reply_text(text)
+            return
+
+        if sent.photo:
+            self._vault.attach_thumbnail(result.reel.url, sent.photo[-1].file_id)
 
     async def _handle_query(self, message: Message, query: str) -> None:
         answer = self._vault.ask(query)

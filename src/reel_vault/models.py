@@ -48,9 +48,14 @@ class SavedReel:
 
 @dataclass(frozen=True)
 class Saved:
-    """A new `SavedReel` was created."""
+    """A new `SavedReel` was created.
+
+    `thumbnail_url` is the extracted (expiring) image URL, passed out rather
+    than stored: only the transport layer can turn it into a durable
+    reference, and it hands that back via `Vault.attach_thumbnail`."""
 
     reel: SavedReel
+    thumbnail_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -81,7 +86,7 @@ class NeedsCollectionChoice:
     author_handle: str | None
     author_name: str | None
     known_collections: dict[str, list[str]]
-    thumbnail_ref: str | None = None
+    thumbnail_url: str | None = None
 
 
 SaveResult = Saved | AlreadySaved | ExtractionFailed | NeedsCollectionChoice

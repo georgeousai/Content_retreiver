@@ -49,6 +49,8 @@ flowchart LR
 
 **Saving.** You share a Reel from Instagram's native share sheet to your Telegram bot — one tap, no app switching. The bot extracts the caption and the creator's handle, files it into a collection (and sub-collection, when one fits), sends it to an LLM for open-vocabulary topic tags, generates an embedding locally on your CPU, and stores one row. Share the same link twice and it tells you it's already saved instead of duplicating it.
 
+**The confirmation is the reel's picture.** Instagram's thumbnail URLs are signed and expire, so storing one would mean a reel saved today shows a broken image in a few months. Instead the "Saved!" reply *is* the thumbnail: Telegram fetches the image server-side and hands back a `file_id` that never expires, which is what gets stored. Every later reply can then show the picture for free. Nothing to configure — it falls back to a plain text reply if the image can't be sent.
+
 **Two layers of organization.** *Collections* are the browsing structure — exactly one per reel, optionally with a sub-collection (`AI › Interview Prep`). Before filing, the LLM is shown the collections that already exist and told to reuse one unless nothing fits, so the taxonomy stays tight instead of sprawling into `AI` / `Artificial Intelligence` / `AI Stuff`. *Tags* are the search surface — many per reel, freeform. They do different jobs, so the vault keeps both.
 
 **When the LLM isn't confident, it asks instead of guessing.** Some captions genuinely carry no topic (`"5 years ago this wasn't a thing"`) — the video's content may be entirely visual. Rather than silently filing those under an unrelated existing collection or a meaningless catch-all, the save pauses: the bot lists your existing collections and asks you to pick one (or name a new one, or reply `skip` to leave it Uncategorized). Nothing already computed — caption, tags, embedding, author — gets redone once you answer.
@@ -77,7 +79,7 @@ Since then, a second slice ([`.scratch/reel-vault-query-answering/`](.scratch/re
 | 01 | Four-way query classification, browse/list answers, per-intent match caps | ✅ Done |
 | 02 | Author-filter queries — "show me @creator's reels", no embedding involved | ✅ Done |
 | 03 | Author-aware synthesis, and aggregate replies that name the reels behind them | ✅ Done |
-| 04 | Automatic thumbnail capture, stored as a non-expiring Telegram `file_id` | ✅ Done |
+| 04 | Automatic thumbnail capture — the save confirmation itself mints a non-expiring Telegram `file_id` | ✅ Done |
 | 05 | Thumbnails rendered in single, list, and aggregate replies | ✅ Done |
 
 **Deliberately not in v1:** LinkedIn and blog sources, audio transcription, on-screen text (OCR), video downloads, multi-user accounts, a web UI, and cloud hosting. The architecture is built so these are *additive* rather than rewrites — see [the roadmap](#where-this-is-going).
@@ -103,7 +105,6 @@ src/reel_vault/
     ├── caption.py         ← oEmbed → yt-dlp fallback chain
     ├── groq_llm.py        ← tagging, intent classification, summarization
     ├── embedder.py        ← local sentence-transformers, CPU only
-    ├── thumbnail.py       ← uploads to Telegram, keeps the file_id
     └── postgres_store.py  ← Postgres/pgvector persistence
 ```
 

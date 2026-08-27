@@ -38,14 +38,6 @@ class CollectionAssigner(Protocol):
         ...
 
 
-class ThumbnailStore(Protocol):
-    def store(self, thumbnail_url: str) -> str | None:
-        """Take a (typically expiring) image URL and return a durable
-        reference we can render from later, or None if it couldn't be
-        stored."""
-        ...
-
-
 class Embedder(Protocol):
     def embed(self, text: str) -> list[float]:
         ...
@@ -61,6 +53,10 @@ class ReelStore(Protocol):
     def known_collections(self) -> dict[str, list[str]]:
         """Every collection currently in the vault, mapped to its
         sub-collections. Feeds the `CollectionAssigner`."""
+        ...
+
+    def set_thumbnail_ref(self, normalized_url: str, thumbnail_ref: str) -> None:
+        """Attach a durable picture reference to an already-saved reel."""
         ...
 
     def find_by_author(self, name: str) -> list[SavedReel]:

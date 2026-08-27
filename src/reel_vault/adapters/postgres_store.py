@@ -86,6 +86,12 @@ class PostgresReelStore:
                 subs.append(subcollection)
         return known
 
+    def set_thumbnail_ref(self, normalized_url: str, thumbnail_ref: str) -> None:
+        self._conn.execute(
+            "UPDATE saved_reels SET thumbnail_ref = %s WHERE normalized_url = %s",
+            (thumbnail_ref, normalized_url),
+        )
+
     def find_by_author(self, name: str) -> list[SavedReel]:
         wanted = name.lstrip("@")
         rows = self._conn.execute(

@@ -35,7 +35,6 @@ from reel_vault.ports import (
     ReelStore,
     Summarizer,
     Tagger,
-    ThumbnailStore,
 )
 from reel_vault.urls import normalize_reel_url
 
@@ -62,7 +61,6 @@ class Vault:
         store: ReelStore,
         query_intent: QueryIntent,
         summarizer: Summarizer,
-        thumbnail_store: ThumbnailStore | None = None,
         match_threshold: float = DEFAULT_MATCH_THRESHOLD,
         top_k_single: int = DEFAULT_TOP_K_SINGLE,
         top_k_list: int = DEFAULT_TOP_K_LIST,
@@ -75,7 +73,6 @@ class Vault:
         self._store = store
         self._query_intent = query_intent
         self._summarizer = summarizer
-        self._thumbnail_store = thumbnail_store
         self._match_threshold = match_threshold
         self._top_k = {
             QueryKind.SINGLE: top_k_single,
@@ -107,7 +104,6 @@ class Vault:
         # Computed regardless of outcome so a follow-up `assign_collection`
         # call never needs to re-tag, re-embed, or re-upload the thumbnail.
         embedding = self._embedder.embed(post.caption)
-        thumbnail_ref = self._capture_thumbnail(post.thumbnail_url)
 
         if assignment.collection == UNCATEGORIZED:
             return NeedsCollectionChoice(
@@ -118,7 +114,7 @@ class Vault:
                 author_handle=post.author_handle,
                 author_name=post.author_name,
                 known_collections=known,
-                thumbnail_ref=thumbnail_ref,
+                thumbnail_url=post.thumbnail_url,
             )
 
         reel = SavedReel(
@@ -130,10 +126,9 @@ class Vault:
             subcollection=assignment.subcollection,
             author_handle=post.author_handle,
             author_name=post.author_name,
-            thumbnail_ref=thumbnail_ref,
         )
         self._store.save(reel)
-        return Saved(reel=reel)
+        return Saved(reel=reel, thumbnail_url=post.thumbnail_url)
 
     def assign_collection(
         self,
@@ -154,21 +149,15 @@ class Vault:
             subcollection=subcollection,
             author_handle=pending.author_handle,
             author_name=pending.author_name,
-            thumbnail_ref=pending.thumbnail_ref,
         )
         self._store.save(reel)
-        return Saved(reel=reel)
+        return Saved(reel=reel, thumbnail_url=pending.thumbnail_url)
 
-    def _capture_thumbnail(self, thumbnail_url: str | None) -> str | None:
-        """A thumbnail is a nicety; the saved reel is the point. Anything the
-        store throws is logged and dropped rather than losing the save."""
-        if thumbnail_url is None or self._thumbnail_store is None:
-            return None
-        try:
-            return self._thumbnail_store.store(thumbnail_url)
-        except Exception:
-            logger.warning("Could not store thumbnail %s", thumbnail_url, exc_info=True)
-            return None
+    def attach_thumbnail(self, url: str, thumbnail_ref: str) -> None:
+        """Record a durable reference to a saved reel's picture. Only the
+        transport layer can mint one, so it is supplied after the save rather
+        than fetched during it."""
+        self._store.set_thumbnail_ref(normalize_reel_url(url), thumbnail_ref)
 
     def ask(self, query: str) -> Answer:
         classification = self._query_intent.classify(query)

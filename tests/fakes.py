@@ -7,6 +7,7 @@ import math
 import re
 import zlib
 from collections.abc import Mapping
+from dataclasses import replace
 
 from reel_vault.models import (
     CollectionAssignment,
@@ -81,21 +82,6 @@ class FakeCollectionAssigner:
         return CollectionAssignment(collection=self._default_collection)
 
 
-class FakeThumbnailStore:
-    """Hands back a stable made-up reference for any URL, recording what it
-    was asked to store. `fail=True` simulates an upload that blows up."""
-
-    def __init__(self, fail: bool = False) -> None:
-        self._fail = fail
-        self.calls: list[str] = []
-
-    def store(self, thumbnail_url: str) -> str | None:
-        if self._fail:
-            raise RuntimeError("upload failed")
-        self.calls.append(thumbnail_url)
-        return f"file-id-for:{thumbnail_url}"
-
-
 class FakeEmbedder:
     """Deterministic bag-of-words embedding: cosine similarity between two
     texts reflects shared-word overlap, which is enough to exercise search
@@ -137,6 +123,11 @@ class InMemoryReelStore:
             if reel.subcollection and reel.subcollection not in subs:
                 subs.append(reel.subcollection)
         return known
+
+    def set_thumbnail_ref(self, normalized_url: str, thumbnail_ref: str) -> None:
+        reel = self._by_url.get(normalized_url)
+        if reel is not None:
+            self._by_url[normalized_url] = replace(reel, thumbnail_ref=thumbnail_ref)
 
     def find_by_author(self, name: str) -> list[SavedReel]:
         wanted = name.casefold().lstrip("@")

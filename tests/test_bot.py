@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from telegram.error import TelegramError
+
 from reel_vault.bot import ReelVaultBot
 from reel_vault.models import (
     UNCATEGORIZED,
@@ -16,7 +18,6 @@ from reel_vault.models import (
     Saved,
 )
 from tests.conftest import make_vault
-from tests.fakes import FakeThumbnailStore
 
 
 def _make_message(text: str, chat_id: int = 1) -> MagicMock:
@@ -185,24 +186,78 @@ async def test_list_reply_shows_every_match_not_just_the_best(
     assert "instagram.com/reel/A2" in reply
 
 
-async def test_single_item_reply_shows_the_reels_picture(bot: ReelVaultBot) -> None:
-    """The picture is how the user recognizes which reel this is."""
+def _photo_reply(file_id: str) -> MagicMock:
+    """What Telegram hands back from sendPhoto: the message it posted, with
+    one entry per rendered size."""
+    sent = MagicMock()
+    sent.photo = [MagicMock(file_id=file_id)]
+    return sent
+
+
+def _save_with_picture(vault, url: str, caption: str, file_id: str) -> None:
+    """Save a reel and give it the file_id Telegram would have minted."""
+    assert isinstance(vault.save_reel(url), Saved)
+    vault.attach_thumbnail(url, file_id)
+
+
+async def test_save_confirmation_doubles_as_the_thumbnail_upload(
+    bot: ReelVaultBot,
+) -> None:
+    """The confirmation is sent as the reel's picture, and the file_id
+    Telegram returns for it is what gets kept — no separate upload, nothing
+    for the user to configure."""
+    url = "https://instagram.com/reel/PIC"
     bot._vault = make_vault(
         captions={
-            "https://instagram.com/reel/PIC": ExtractedPost(
+            url: ExtractedPost(
                 caption="ai agents explained", thumbnail_url="https://cdn/t.jpg"
             )
         },
-        thumbnail_store=FakeThumbnailStore(),
     )
-    assert isinstance(bot._vault.save_reel("https://instagram.com/reel/PIC"), Saved)
+
+    message = _make_message(url)
+    message.reply_photo.return_value = _photo_reply("tg-file-id")
+    await bot._on_message(_make_update(message), MagicMock())
+
+    kwargs = message.reply_photo.await_args.kwargs
+    assert kwargs["photo"] == "https://cdn/t.jpg"  # Telegram fetches it server-side
+    assert "Saved!" in kwargs["caption"]
+
+    saved = bot._vault._store.find_by_url(url)
+    assert saved is not None
+    assert saved.thumbnail_ref == "tg-file-id"
+
+
+async def test_a_reel_still_saves_when_its_picture_cannot_be_sent(
+    bot: ReelVaultBot,
+) -> None:
+    url = "https://instagram.com/reel/PIC"
+    bot._vault = make_vault(
+        captions={url: ExtractedPost(caption="ai agents", thumbnail_url="https://cdn/x.jpg")},
+    )
+
+    message = _make_message(url)
+    message.reply_photo.side_effect = TelegramError("bad photo url")
+    await bot._on_message(_make_update(message), MagicMock())
+
+    assert "Saved!" in message.reply_text.await_args.args[0]
+    saved = bot._vault._store.find_by_url(url)
+    assert saved is not None
+    assert saved.thumbnail_ref is None
+
+
+async def test_single_item_reply_shows_the_reels_picture(bot: ReelVaultBot) -> None:
+    """The picture is how the user recognizes which reel this is."""
+    url = "https://instagram.com/reel/PIC"
+    bot._vault = make_vault(captions={url: "ai agents explained"})
+    _save_with_picture(bot._vault, url, "ai agents explained", "tg-file-id")
 
     message = _make_message("find that reel about ai agents")
     await bot._on_message(_make_update(message), MagicMock())
 
     message.reply_photo.assert_awaited_once()
     kwargs = message.reply_photo.await_args.kwargs
-    assert kwargs["photo"] == "file-id-for:https://cdn/t.jpg"
+    assert kwargs["photo"] == "tg-file-id"
     assert "instagram.com/reel/PIC" in kwargs["caption"]
 
 
@@ -221,27 +276,19 @@ async def test_a_reel_saved_without_a_thumbnail_still_replies_as_text(
 async def test_list_reply_sends_the_matching_reels_pictures(bot: ReelVaultBot) -> None:
     bot._vault = make_vault(
         captions={
-            "https://instagram.com/reel/A1": ExtractedPost(
-                caption="ai agents explained", thumbnail_url="https://cdn/1.jpg"
-            ),
-            "https://instagram.com/reel/A2": ExtractedPost(
-                caption="ai agents in production", thumbnail_url="https://cdn/2.jpg"
-            ),
+            "https://instagram.com/reel/A1": "ai agents explained",
+            "https://instagram.com/reel/A2": "ai agents in production",
         },
-        thumbnail_store=FakeThumbnailStore(),
     )
-    for url in ("https://instagram.com/reel/A1", "https://instagram.com/reel/A2"):
-        assert isinstance(bot._vault.save_reel(url), Saved)
+    _save_with_picture(bot._vault, "https://instagram.com/reel/A1", "", "file-1")
+    _save_with_picture(bot._vault, "https://instagram.com/reel/A2", "", "file-2")
 
     message = _make_message("show me my ai agents reels")
     await bot._on_message(_make_update(message), MagicMock())
 
     message.reply_media_group.assert_awaited_once()
     media = message.reply_media_group.await_args.args[0]
-    assert {item.media for item in media} == {
-        "file-id-for:https://cdn/1.jpg",
-        "file-id-for:https://cdn/2.jpg",
-    }
+    assert {item.media for item in media} == {"file-1", "file-2"}
     # The full list still goes out as text, so nothing is hidden behind photos.
     assert "instagram.com/reel/A1" in message.reply_text.await_args.args[0]
 
@@ -252,14 +299,12 @@ async def test_more_than_one_album_of_matches_still_all_get_pictures(
     """Telegram caps an album at 10; a 12-match browse must not silently drop
     the last two pictures."""
     captions = {
-        f"https://instagram.com/reel/N{i}": ExtractedPost(
-            caption=f"ai agents topic number{i}", thumbnail_url=f"https://cdn/{i}.jpg"
-        )
+        f"https://instagram.com/reel/N{i}": f"ai agents topic number{i}"
         for i in range(12)
     }
-    bot._vault = make_vault(captions=captions, thumbnail_store=FakeThumbnailStore())
-    for url in captions:
-        assert isinstance(bot._vault.save_reel(url), Saved)
+    bot._vault = make_vault(captions=captions)
+    for i, url in enumerate(captions):
+        _save_with_picture(bot._vault, url, "", f"file-{i}")
 
     message = _make_message("show me my ai agents reels")
     await bot._on_message(_make_update(message), MagicMock())
