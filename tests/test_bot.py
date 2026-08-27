@@ -67,6 +67,33 @@ async def test_extraction_failure_prompts_for_manual_caption_then_saves(
     assert "#manual" in reply
 
 
+async def test_sharing_a_p_style_link_saves_it_as_a_reel(bot: ReelVaultBot) -> None:
+    """Instagram's generic /p/ permalink covers videos too — a real reel
+    share does not reliably come through as /reel/ (regression: a /p/ reel
+    link was previously silently misrouted into ask() instead of saved)."""
+    bot._vault = make_vault(
+        captions={"https://www.instagram.com/p/DcellwxRN1m/": "a caption about ai"},
+        tags_by_caption={"a caption about ai": ["ai"]},
+    )
+
+    message = _make_message("https://www.instagram.com/p/DcellwxRN1m/")
+    await bot._on_message(_make_update(message), MagicMock())
+
+    reply = message.reply_text.await_args.args[0]
+    assert "#ai" in reply
+
+
+async def test_unrecognized_instagram_link_gets_a_clear_reply_not_a_search(
+    bot: ReelVaultBot,
+) -> None:
+    message = _make_message("https://www.instagram.com/some_profile/")
+    await bot._on_message(_make_update(message), MagicMock())
+
+    message.reply_text.assert_awaited_once()
+    reply = message.reply_text.await_args.args[0]
+    assert "vault" not in reply.lower()  # not the ask() "Nothing in the vault..." reply
+
+
 async def test_plain_text_query_delegates_to_ask(bot: ReelVaultBot) -> None:
     result = bot._vault.save_reel("https://instagram.com/reel/ABC")
     assert isinstance(result, Saved)

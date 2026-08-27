@@ -21,8 +21,15 @@ from reel_vault.models import (
 from reel_vault.vault import Vault
 
 INSTAGRAM_REEL_URL = re.compile(
-    r"https?://(?:www\.)?instagram\.com/reels?/[\w-]+/?\S*", re.IGNORECASE
+    # Instagram's generic /p/ permalink covers photos, carousels, AND
+    # videos/reels depending on how the link was generated — a real reel
+    # share does not reliably come through as /reel/. Matching /p/ too was
+    # previously removed as scope creep, but that broke real reel shares.
+    r"https?://(?:www\.)?instagram\.com/(?:reel|reels|p)/[\w-]+/?\S*",
+    re.IGNORECASE,
 )
+
+INSTAGRAM_URL = re.compile(r"https?://(?:www\.)?instagram\.com/\S*", re.IGNORECASE)
 
 
 def _format_location(reel: SavedReel) -> str:
@@ -69,6 +76,15 @@ class ReelVaultBot:
         pending_url = self._pending_manual_caption.pop(chat_id, None)
         if pending_url is not None:
             await self._handle_manual_caption(message, pending_url, text)
+            return
+
+        if INSTAGRAM_URL.search(text):
+            # Looks like an Instagram link, but not one our pattern recognizes
+            # (e.g. a profile or explore link) — say so, rather than silently
+            # treating the raw URL as a semantic search query.
+            await message.reply_text(
+                "That doesn't look like a post or reel link I can save."
+            )
             return
 
         await self._handle_query(message, text)
