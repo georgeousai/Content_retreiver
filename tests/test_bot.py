@@ -142,6 +142,41 @@ async def test_skip_reply_leaves_the_reel_uncategorized(bot: ReelVaultBot) -> No
     assert saved.collection == UNCATEGORIZED
 
 
+async def test_aggregate_reply_carries_the_reels_behind_the_answer(
+    bot: ReelVaultBot,
+) -> None:
+    """A synthesized answer with no links leaves the user unable to go watch
+    the reels it was built from."""
+    assert isinstance(bot._vault.save_reel("https://instagram.com/reel/ABC"), Saved)
+
+    message = _make_message("summarize my ai reels")
+    await bot._on_message(_make_update(message), MagicMock())
+
+    reply = message.reply_text.await_args.args[0]
+    assert "a caption about ai" in reply  # the synthesized text
+    assert "instagram.com/reel/ABC" in reply  # and the reel behind it
+
+
+async def test_list_reply_shows_every_match_not_just_the_best(
+    bot: ReelVaultBot,
+) -> None:
+    bot._vault = make_vault(
+        captions={
+            "https://instagram.com/reel/A1": "ai agents explained",
+            "https://instagram.com/reel/A2": "ai agents in production",
+        },
+    )
+    for url in ("https://instagram.com/reel/A1", "https://instagram.com/reel/A2"):
+        assert isinstance(bot._vault.save_reel(url), Saved)
+
+    message = _make_message("show me my ai agents reels")
+    await bot._on_message(_make_update(message), MagicMock())
+
+    reply = message.reply_text.await_args.args[0]
+    assert "instagram.com/reel/A1" in reply
+    assert "instagram.com/reel/A2" in reply
+
+
 async def test_plain_text_query_delegates_to_ask(bot: ReelVaultBot) -> None:
     result = bot._vault.save_reel("https://instagram.com/reel/ABC")
     assert isinstance(result, Saved)

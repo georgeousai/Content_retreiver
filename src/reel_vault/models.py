@@ -81,6 +81,26 @@ class NeedsCollectionChoice:
 SaveResult = Saved | AlreadySaved | ExtractionFailed | NeedsCollectionChoice
 
 
+@dataclass(frozen=True)
+class SummarySource:
+    """One matched reel as the summarizer sees it. Deliberately narrower than
+    `SavedReel` — a summarizer needs the words and who wrote them, not the
+    embedding — and deliberately includes the author, without which no
+    "which creator said what" question can be answered at all."""
+
+    caption: str
+    author_handle: str | None = None
+    author_name: str | None = None
+
+    @classmethod
+    def of(cls, reel: SavedReel) -> SummarySource:
+        return cls(
+            caption=reel.caption,
+            author_handle=reel.author_handle,
+            author_name=reel.author_name,
+        )
+
+
 class QueryKind(Enum):
     """What shape of answer a query is asking for. Chosen by `QueryIntent`
     in a single classification call — never by the user picking a mode."""

@@ -204,7 +204,12 @@ class ReelVaultBot:
                 _format_reel_list(answer.reels, author=answer.author)
             )
         elif isinstance(answer, AggregateAnswer):
-            await message.reply_text(answer.text)
+            # The vault has always returned the reels behind a synthesized
+            # answer; the reply used to drop them, leaving no way to go and
+            # watch what the answer was built from.
+            await message.reply_text(
+                f"{answer.text}\n\n{_format_reel_list(answer.reels)}"
+            )
         elif isinstance(answer, NoMatch):
             await message.reply_text("Nothing in the vault matches that.")
 

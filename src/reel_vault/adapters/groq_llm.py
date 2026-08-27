@@ -21,6 +21,7 @@ from reel_vault.models import (
     CollectionAssignment,
     QueryClassification,
     QueryKind,
+    SummarySource,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,7 +60,12 @@ AUTHOR_FILTER."""
 SUMMARY_SYSTEM_PROMPT = (
     "You answer a user's question using ONLY the provided captions from their "
     "saved reels. Synthesize a concise answer grounded in that content. Do not "
-    "invent information not present in the captions."
+    "invent information not present in the captions.\n\n"
+    "Each caption is labelled with the creator who posted it. When the user "
+    "asks who said what, or to group/attribute by creator, use those labels. "
+    "Never attribute a claim to a creator whose caption does not contain it, "
+    "and never guess at content a caption does not state — a caption is all "
+    "you can see of its reel, not the video itself."
 )
 
 COLLECTION_SYSTEM_PROMPT = (
@@ -140,12 +146,23 @@ class GroqCollectionAssigner(_GroqChatAdapter):
 
 
 class GroqSummarizer(_GroqChatAdapter):
-    def summarize(self, query: str, captions: list[str]) -> str:
-        captions_block = "\n\n".join(f"- {caption}" for caption in captions)
+    def summarize(self, query: str, sources: list[SummarySource]) -> str:
+        captions_block = "\n\n".join(_format_source(source) for source in sources)
         user_content = f"Question: {query}\n\nCaptions:\n{captions_block}"
         return self._complete(
             system_prompt=SUMMARY_SYSTEM_PROMPT, user_content=user_content, temperature=0.3
         )
+
+
+def _format_source(source: SummarySource) -> str:
+    """Label each caption with its creator, so the model can attribute. An
+    unknown creator is said to be unknown rather than left blank, which the
+    model could otherwise read as the previous caption's author."""
+    if source.author_handle and source.author_name:
+        who = f"{source.author_name} (@{source.author_handle})"
+    else:
+        who = source.author_handle or source.author_name or "unknown creator"
+    return f"- [by {who}] {source.caption}"
 
 
 def _parse_classification(content: str) -> QueryClassification:

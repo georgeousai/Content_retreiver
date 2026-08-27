@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from reel_vault.models import ExtractedPost, ListAnswer, Saved
+from reel_vault.models import AggregateAnswer, ExtractedPost, ListAnswer, Saved
 from tests.conftest import make_vault
-from tests.fakes import FakeEmbedder, InMemoryReelStore
+from tests.fakes import FakeEmbedder, FakeSummarizer, InMemoryReelStore
 
 POSTS = {
     "https://instagram.com/reel/1": ExtractedPost(
@@ -78,3 +78,32 @@ def test_author_with_nothing_saved_returns_an_empty_list_not_an_error() -> None:
     assert isinstance(answer, ListAnswer)
     assert answer.reels == []
     assert answer.author == "nobody"
+
+
+def test_aggregate_summarizer_is_given_each_caption_with_its_author() -> None:
+    """Without the author reaching the summarizer, no "which creator said
+    what" question is answerable at all — so assert it actually arrives."""
+    summarizer = FakeSummarizer()
+    vault, _, _ = _seeded_vault(summarizer=summarizer)
+
+    answer = vault.ask("summarize my reels about deadlift and protein")
+
+    assert isinstance(answer, AggregateAnswer)
+    _, sources = summarizer.calls[-1]
+    assert {(s.caption, s.author_handle) for s in sources} >= {
+        ("deadlift form breakdown", "gymshark"),
+        ("protein timing myths", "gymshark"),
+    }
+    assert all(s.author_name == "Gymshark" for s in sources if s.author_handle == "gymshark")
+
+
+def test_summarizer_only_ever_sees_the_matched_reels() -> None:
+    """Attribution must come from the matched captions, never from reels the
+    query didn't match — the summarizer can't invent what it never saw."""
+    summarizer = FakeSummarizer()
+    vault, _, _ = _seeded_vault(summarizer=summarizer, match_threshold=0.3)
+
+    vault.ask("summarize my transformer architecture reels")
+
+    _, sources = summarizer.calls[-1]
+    assert [s.caption for s in sources] == ["transformer architecture explained"]

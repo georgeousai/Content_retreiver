@@ -12,6 +12,7 @@ from reel_vault.models import (
     ExtractedPost,
     QueryClassification,
     SavedReel,
+    SummarySource,
 )
 
 
@@ -77,5 +78,8 @@ class QueryIntent(Protocol):
 
 
 class Summarizer(Protocol):
-    def summarize(self, query: str, captions: list[str]) -> str:
+    def summarize(self, query: str, sources: list[SummarySource]) -> str:
+        """Synthesize an answer from the matched reels. Sources carry their
+        author so the answer can attribute across creators — but only ever
+        from what the captions themselves say."""
         ...

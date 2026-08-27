@@ -14,6 +14,7 @@ from reel_vault.models import (
     QueryClassification,
     QueryKind,
     SavedReel,
+    SummarySource,
 )
 from reel_vault.urls import normalize_reel_url
 
@@ -182,14 +183,18 @@ class FakeQueryIntent:
 class FakeSummarizer:
     """Records what it was asked to summarize, so tests can assert both that
     a list query never reaches it and that aggregate queries hand it the
-    right captions."""
+    right captions and authors. Echoes the attribution it was given, so a
+    test can tell whether author actually reached the summarizer."""
 
     def __init__(self) -> None:
-        self.calls: list[tuple[str, list[str]]] = []
+        self.calls: list[tuple[str, list[SummarySource]]] = []
 
-    def summarize(self, query: str, captions: list[str]) -> str:
-        self.calls.append((query, list(captions)))
-        return " | ".join(captions)
+    def summarize(self, query: str, sources: list[SummarySource]) -> str:
+        self.calls.append((query, list(sources)))
+        return " | ".join(
+            f"{source.caption} (by {source.author_handle or 'unknown'})"
+            for source in sources
+        )
 
 
 def _cosine(a: list[float], b: list[float]) -> float:

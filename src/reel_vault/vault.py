@@ -23,6 +23,7 @@ from reel_vault.models import (
     SavedReel,
     SaveResult,
     SingleItemAnswer,
+    SummarySource,
 )
 from reel_vault.ports import (
     CaptionFetcher,
@@ -169,8 +170,10 @@ class Vault:
             return NoMatch(query=query)
 
         if kind is QueryKind.AGGREGATE:
-            text = self._summarizer.summarize(query, [reel.caption for reel in matches])
-            return AggregateAnswer(text=text, reels=matches)
+            sources = [SummarySource.of(reel) for reel in matches]
+            return AggregateAnswer(
+                text=self._summarizer.summarize(query, sources), reels=matches
+            )
 
         # An AUTHOR_FILTER reaching here named nobody the classifier could
         # pin down, so the semantic path is the better of the two guesses.
