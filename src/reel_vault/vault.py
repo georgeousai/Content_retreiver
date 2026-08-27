@@ -127,8 +127,17 @@ class Vault:
             author_handle=post.author_handle,
             author_name=post.author_name,
         )
-        self._store.save(reel)
-        return Saved(reel=reel, thumbnail_url=post.thumbnail_url)
+        return self._persist(reel, thumbnail_url=post.thumbnail_url)
+
+    def _persist(self, reel: SavedReel, *, thumbnail_url: str | None) -> SaveResult:
+        """Write the reel, unless someone beat us to that URL between our
+        duplicate check and now — two bot processes, a double-tap, or (later)
+        two users on the same reel. Claiming "Saved!" for a write that did
+        nothing is worse than being late to notice."""
+        if not self._store.save(reel):
+            existing = self._store.find_by_url(reel.url)
+            return AlreadySaved(reel=existing if existing is not None else reel)
+        return Saved(reel=reel, thumbnail_url=thumbnail_url)
 
     def assign_collection(
         self,
@@ -136,7 +145,7 @@ class Vault:
         *,
         collection: str,
         subcollection: str | None = None,
-    ) -> Saved:
+    ) -> SaveResult:
         """Finish a save that `save_reel` paused on `NeedsCollectionChoice`,
         now that the caller (the bot, having asked the user) supplies where
         it belongs."""
@@ -150,8 +159,7 @@ class Vault:
             author_handle=pending.author_handle,
             author_name=pending.author_name,
         )
-        self._store.save(reel)
-        return Saved(reel=reel, thumbnail_url=pending.thumbnail_url)
+        return self._persist(reel, thumbnail_url=pending.thumbnail_url)
 
     def attach_thumbnail(self, url: str, thumbnail_ref: str) -> None:
         """Record a durable reference to a saved reel's picture. Only the

@@ -47,7 +47,10 @@ class ReelStore(Protocol):
     def find_by_url(self, normalized_url: str) -> SavedReel | None:
         ...
 
-    def save(self, reel: SavedReel) -> None:
+    def save(self, reel: SavedReel) -> bool:
+        """Persist a new reel. Returns False if one with this URL already
+        existed, so a racing caller can tell "I saved it" from "someone
+        already had"."""
         ...
 
     def known_collections(self) -> dict[str, list[str]]:

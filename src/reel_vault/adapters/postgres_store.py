@@ -54,8 +54,8 @@ class PostgresReelStore:
         ).fetchone()
         return _to_reel(row) if row else None
 
-    def save(self, reel: SavedReel) -> None:
-        self._conn.execute(
+    def save(self, reel: SavedReel) -> bool:
+        cursor = self._conn.execute(
             f"INSERT INTO saved_reels ({COLUMNS}) "
             "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
             "ON CONFLICT (normalized_url) DO NOTHING",
@@ -72,6 +72,8 @@ class PostgresReelStore:
                 reel.saved_at,
             ),
         )
+        # DO NOTHING leaves rowcount at 0 when the URL was already there.
+        return cursor.rowcount > 0
 
     def known_collections(self) -> dict[str, list[str]]:
         rows = self._conn.execute(

@@ -69,6 +69,7 @@ def test_pausing_for_a_collection_choice_carries_the_thumbnail_url_through() -> 
 
     result = vault.assign_collection(pending, collection="AI")
 
+    assert isinstance(result, Saved)
     assert result.thumbnail_url == "https://cdn/thumb.jpg"
 
 

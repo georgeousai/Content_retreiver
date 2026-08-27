@@ -113,8 +113,12 @@ class InMemoryReelStore:
     def find_by_url(self, normalized_url: str) -> SavedReel | None:
         return self._by_url.get(normalized_url)
 
-    def save(self, reel: SavedReel) -> None:
-        self._by_url[normalize_reel_url(reel.url)] = reel
+    def save(self, reel: SavedReel) -> bool:
+        key = normalize_reel_url(reel.url)
+        if key in self._by_url:
+            return False
+        self._by_url[key] = reel
+        return True
 
     def known_collections(self) -> dict[str, list[str]]:
         known: dict[str, list[str]] = {}

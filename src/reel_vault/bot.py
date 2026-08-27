@@ -190,7 +190,7 @@ class ReelVaultBot:
         result = self._vault.assign_collection(
             pending, collection=collection, subcollection=subcollection
         )
-        await message.reply_text(_format_saved_reply(result.reel, already_saved=False))
+        await self._reply_to_save_result(message, result)
 
     async def _reply_to_save_result(self, message: Message, result: SaveResult) -> None:
         if isinstance(result, Saved):
