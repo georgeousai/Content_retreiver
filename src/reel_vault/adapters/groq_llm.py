@@ -1,6 +1,12 @@
 """Groq-backed adapters: open-vocabulary tagging, aggregate/single-item query
 classification, and cross-caption summarization. All on Groq's free tier
-using an open-source Llama-family model."""
+using an open-weight model.
+
+Groq's free-tier model lineup changes over time; the Llama-family chat
+models the original spec called for have since been deprecated on Groq.
+`openai/gpt-oss-20b` is the current open-weight equivalent. If this starts
+404ing again, run `client.models.list()` to see what's currently available
+and update DEFAULT_MODEL."""
 
 from __future__ import annotations
 
@@ -11,7 +17,7 @@ from groq import Groq
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "llama-3.1-8b-instant"
+DEFAULT_MODEL = "openai/gpt-oss-20b"
 
 TAG_SYSTEM_PROMPT = (
     "You tag short social-media captions with topic keywords. Given a caption, "

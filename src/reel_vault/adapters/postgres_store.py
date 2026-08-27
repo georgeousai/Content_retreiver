@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from collections.abc import Iterable
+from datetime import timezone
 
 import psycopg
+from pgvector import Vector
 from pgvector.psycopg import register_vector
 
 from reel_vault.models import SavedReel
@@ -41,17 +43,21 @@ class PostgresReelStore:
             "INSERT INTO saved_reels (normalized_url, caption, tags, embedding, saved_at) "
             "VALUES (%s, %s, %s, %s, %s) "
             "ON CONFLICT (normalized_url) DO NOTHING",
-            (reel.url, reel.caption, reel.tags, reel.embedding, reel.saved_at),
+            (reel.url, reel.caption, reel.tags, Vector(reel.embedding), reel.saved_at),
         )
 
     def search(
         self, query_embedding: list[float], top_k: int
     ) -> list[tuple[SavedReel, float]]:
+        # `Vector` is required so the parameter is sent as pgvector's `vector`
+        # type; a bare list adapts to `double precision[]`, which has no `<=>`
+        # operator.
+        vector = Vector(query_embedding)
         rows = self._conn.execute(
             "SELECT normalized_url, caption, tags, embedding, saved_at, "
             "1 - (embedding <=> %s) AS similarity "
             "FROM saved_reels ORDER BY embedding <=> %s LIMIT %s",
-            (query_embedding, query_embedding, top_k),
+            (vector, vector, top_k),
         ).fetchall()
         return [(_to_reel(row[:-1]), row[-1]) for row in rows]
 
@@ -63,6 +69,13 @@ def _to_reel(row: tuple) -> SavedReel:
         url=normalized_url,
         caption=caption,
         tags=list(tags),
-        embedding=list(embedding),
+        embedding=_to_float_list(embedding),
         saved_at=saved_at,
     )
+
+
+def _to_float_list(embedding: Vector | Iterable[float]) -> list[float]:
+    """`register_vector` hands back a pgvector `Vector`, which is not iterable."""
+    if isinstance(embedding, Vector):
+        return list(embedding.to_list())
+    return [float(value) for value in embedding]
