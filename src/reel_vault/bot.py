@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import re
 
-from telegram import Message, Update
+from telegram import InputMediaPhoto, Message, Update
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
 from reel_vault.models import (
@@ -33,6 +33,11 @@ INSTAGRAM_REEL_URL = re.compile(
 )
 
 INSTAGRAM_URL = re.compile(r"https?://(?:www\.)?instagram\.com/\S*", re.IGNORECASE)
+
+# Telegram caps a media group at 10. The full list always goes out as text, so
+# this bounds how many pictures accompany it, not how many results the user
+# gets.
+MAX_THUMBNAILS = 10
 
 
 def _format_location(reel: SavedReel) -> str:
@@ -198,11 +203,12 @@ class ReelVaultBot:
         answer = self._vault.ask(query)
 
         if isinstance(answer, SingleItemAnswer):
-            await message.reply_text(_format_reel_detail(answer.reel))
+            await self._reply_with_reel(message, answer.reel)
         elif isinstance(answer, ListAnswer):
             await message.reply_text(
                 _format_reel_list(answer.reels, author=answer.author)
             )
+            await self._send_thumbnails(message, answer.reels)
         elif isinstance(answer, AggregateAnswer):
             # The vault has always returned the reels behind a synthesized
             # answer; the reply used to drop them, leaving no way to go and
@@ -210,8 +216,32 @@ class ReelVaultBot:
             await message.reply_text(
                 f"{answer.text}\n\n{_format_reel_list(answer.reels)}"
             )
+            await self._send_thumbnails(message, answer.reels)
         elif isinstance(answer, NoMatch):
             await message.reply_text("Nothing in the vault matches that.")
+
+    async def _reply_with_reel(self, message: Message, reel: SavedReel) -> None:
+        """One reel, as a picture the user can recognize where we have one."""
+        detail = _format_reel_detail(reel)
+        if reel.thumbnail_ref:
+            await message.reply_photo(photo=reel.thumbnail_ref, caption=detail)
+        else:
+            await message.reply_text(detail)
+
+    async def _send_thumbnails(self, message: Message, reels: list[SavedReel]) -> None:
+        """Pictures to scan alongside the list. Reels saved before thumbnails
+        existed simply have none, and are already in the text list."""
+        media = [
+            InputMediaPhoto(media=reel.thumbnail_ref, caption=reel.url)
+            for reel in reels[:MAX_THUMBNAILS]
+            if reel.thumbnail_ref
+        ]
+        if not media:
+            return
+        if len(media) == 1:
+            await message.reply_photo(photo=media[0].media, caption=media[0].caption)
+            return
+        await message.reply_media_group(media)
 
 
 def build_bot(vault: Vault, token: str) -> ReelVaultBot:

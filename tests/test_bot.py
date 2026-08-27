@@ -9,8 +9,14 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from reel_vault.bot import ReelVaultBot
-from reel_vault.models import UNCATEGORIZED, CollectionAssignment, Saved
+from reel_vault.models import (
+    UNCATEGORIZED,
+    CollectionAssignment,
+    ExtractedPost,
+    Saved,
+)
 from tests.conftest import make_vault
+from tests.fakes import FakeThumbnailStore
 
 
 def _make_message(text: str, chat_id: int = 1) -> MagicMock:
@@ -18,6 +24,8 @@ def _make_message(text: str, chat_id: int = 1) -> MagicMock:
     message.text = text
     message.chat_id = chat_id
     message.reply_text = AsyncMock()
+    message.reply_photo = AsyncMock()
+    message.reply_media_group = AsyncMock()
     return message
 
 
@@ -175,6 +183,67 @@ async def test_list_reply_shows_every_match_not_just_the_best(
     reply = message.reply_text.await_args.args[0]
     assert "instagram.com/reel/A1" in reply
     assert "instagram.com/reel/A2" in reply
+
+
+async def test_single_item_reply_shows_the_reels_picture(bot: ReelVaultBot) -> None:
+    """The picture is how the user recognizes which reel this is."""
+    bot._vault = make_vault(
+        captions={
+            "https://instagram.com/reel/PIC": ExtractedPost(
+                caption="ai agents explained", thumbnail_url="https://cdn/t.jpg"
+            )
+        },
+        thumbnail_store=FakeThumbnailStore(),
+    )
+    assert isinstance(bot._vault.save_reel("https://instagram.com/reel/PIC"), Saved)
+
+    message = _make_message("find that reel about ai agents")
+    await bot._on_message(_make_update(message), MagicMock())
+
+    message.reply_photo.assert_awaited_once()
+    kwargs = message.reply_photo.await_args.kwargs
+    assert kwargs["photo"] == "file-id-for:https://cdn/t.jpg"
+    assert "instagram.com/reel/PIC" in kwargs["caption"]
+
+
+async def test_a_reel_saved_without_a_thumbnail_still_replies_as_text(
+    bot: ReelVaultBot,
+) -> None:
+    assert isinstance(bot._vault.save_reel("https://instagram.com/reel/ABC"), Saved)
+
+    message = _make_message("find that reel about ai")
+    await bot._on_message(_make_update(message), MagicMock())
+
+    message.reply_photo.assert_not_awaited()
+    assert "instagram.com/reel/ABC" in message.reply_text.await_args.args[0]
+
+
+async def test_list_reply_sends_the_matching_reels_pictures(bot: ReelVaultBot) -> None:
+    bot._vault = make_vault(
+        captions={
+            "https://instagram.com/reel/A1": ExtractedPost(
+                caption="ai agents explained", thumbnail_url="https://cdn/1.jpg"
+            ),
+            "https://instagram.com/reel/A2": ExtractedPost(
+                caption="ai agents in production", thumbnail_url="https://cdn/2.jpg"
+            ),
+        },
+        thumbnail_store=FakeThumbnailStore(),
+    )
+    for url in ("https://instagram.com/reel/A1", "https://instagram.com/reel/A2"):
+        assert isinstance(bot._vault.save_reel(url), Saved)
+
+    message = _make_message("show me my ai agents reels")
+    await bot._on_message(_make_update(message), MagicMock())
+
+    message.reply_media_group.assert_awaited_once()
+    media = message.reply_media_group.await_args.args[0]
+    assert {item.media for item in media} == {
+        "file-id-for:https://cdn/1.jpg",
+        "file-id-for:https://cdn/2.jpg",
+    }
+    # The full list still goes out as text, so nothing is hidden behind photos.
+    assert "instagram.com/reel/A1" in message.reply_text.await_args.args[0]
 
 
 async def test_plain_text_query_delegates_to_ask(bot: ReelVaultBot) -> None:
