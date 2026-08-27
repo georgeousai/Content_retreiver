@@ -30,6 +30,8 @@ def make_vault(
     collection_assigner: FakeCollectionAssigner | None = None,
     store: InMemoryReelStore | None = None,
     summarizer: FakeSummarizer | None = None,
+    embedder: FakeEmbedder | None = None,
+    query_intent: FakeQueryIntent | None = None,
     aggregate_triggers: tuple[str, ...] = ("give me all", "summarize", "every"),
     match_threshold: float = 0.1,
     **top_k_overrides: int,
@@ -42,9 +44,13 @@ def make_vault(
             if collection_assigner is not None
             else FakeCollectionAssigner(assignments)
         ),
-        embedder=FakeEmbedder(),
+        embedder=embedder if embedder is not None else FakeEmbedder(),
         store=store if store is not None else InMemoryReelStore(),
-        query_intent=FakeQueryIntent(aggregate_triggers),
+        query_intent=(
+            query_intent
+            if query_intent is not None
+            else FakeQueryIntent(aggregate_triggers)
+        ),
         summarizer=summarizer if summarizer is not None else FakeSummarizer(),
         match_threshold=match_threshold,
         **top_k_overrides,

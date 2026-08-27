@@ -110,10 +110,15 @@ class SingleItemAnswer:
 class ListAnswer:
     """Matched reels handed back as-is, for browsing. Deliberately a distinct
     type rather than an `AggregateAnswer` with empty `text`, so that
-    `AggregateAnswer.text` is always a real synthesized answer."""
+    `AggregateAnswer.text` is always a real synthesized answer.
+
+    `author` is set when the list came from an author filter rather than a
+    topic search — an empty `reels` then means "that creator, nothing saved",
+    which is a different statement from "nothing matched your topic"."""
 
     query: str
     reels: list[SavedReel]
+    author: str | None = None
 
 
 @dataclass(frozen=True)

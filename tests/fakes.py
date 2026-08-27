@@ -92,8 +92,10 @@ class FakeEmbedder:
 
     def __init__(self, dim: int = 256) -> None:
         self._dim = dim
+        self.calls: list[str] = []
 
     def embed(self, text: str) -> list[float]:
+        self.calls.append(text)
         vec = [0.0] * self._dim
         for word in text.lower().split():
             vec[zlib.crc32(word.encode()) % self._dim] += 1.0
@@ -104,6 +106,7 @@ class FakeEmbedder:
 class InMemoryReelStore:
     def __init__(self) -> None:
         self._by_url: dict[str, SavedReel] = {}
+        self.search_calls: list[int] = []
 
     def find_by_url(self, normalized_url: str) -> SavedReel | None:
         return self._by_url.get(normalized_url)
@@ -119,9 +122,21 @@ class InMemoryReelStore:
                 subs.append(reel.subcollection)
         return known
 
+    def find_by_author(self, name: str) -> list[SavedReel]:
+        wanted = name.casefold().lstrip("@")
+        return [
+            reel
+            for reel in self._by_url.values()
+            if wanted in {
+                (reel.author_handle or "").casefold(),
+                (reel.author_name or "").casefold(),
+            }
+        ]
+
     def search(
         self, query_embedding: list[float], top_k: int
     ) -> list[tuple[SavedReel, float]]:
+        self.search_calls.append(top_k)
         scored = [
             (reel, _cosine(query_embedding, reel.embedding))
             for reel in self._by_url.values()
@@ -140,14 +155,19 @@ class FakeQueryIntent:
         self,
         aggregate_triggers: tuple[str, ...] = ("give me all", "summarize", "every"),
         list_triggers: tuple[str, ...] = ("show me", "list ", "browse"),
+        classifications: Mapping[str, QueryClassification] | None = None,
     ) -> None:
         self._aggregate_triggers = aggregate_triggers
         self._list_triggers = list_triggers
+        self._classifications = classifications or {}
 
     def classify(self, query: str) -> QueryClassification:
+        if query in self._classifications:
+            return self._classifications[query]
+
         lowered = query.lower()
 
-        handle = re.search(r"@([\w.]+)", query)
+        handle = re.search(r"@([\w.]+(?: [A-Z][\w.]*)*)", query)
         if handle:
             return QueryClassification(
                 kind=QueryKind.AUTHOR_FILTER, author=handle.group(1)

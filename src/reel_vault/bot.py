@@ -78,10 +78,18 @@ def _format_reel_detail(reel: SavedReel) -> str:
     return "\n".join(lines)
 
 
-def _format_reel_list(reels: list[SavedReel]) -> str:
+def _format_reel_list(reels: list[SavedReel], *, author: str | None = None) -> str:
     """Many reels, one line each — enough to scan and pick, not the full
     detail block repeated N times."""
-    header = f"{len(reels)} {'reel' if len(reels) == 1 else 'reels'}:"
+    if not reels:
+        return (
+            f"Nothing saved from @{author} yet."
+            if author
+            else "Nothing in the vault matches that."
+        )
+
+    count = f"{len(reels)} {'reel' if len(reels) == 1 else 'reels'}"
+    header = f"{count} from @{author}:" if author else f"{count}:"
     lines = []
     for reel in reels:
         suffix = f" — @{reel.author_handle}" if reel.author_handle else ""
@@ -192,7 +200,9 @@ class ReelVaultBot:
         if isinstance(answer, SingleItemAnswer):
             await message.reply_text(_format_reel_detail(answer.reel))
         elif isinstance(answer, ListAnswer):
-            await message.reply_text(_format_reel_list(answer.reels))
+            await message.reply_text(
+                _format_reel_list(answer.reels, author=answer.author)
+            )
         elif isinstance(answer, AggregateAnswer):
             await message.reply_text(answer.text)
         elif isinstance(answer, NoMatch):

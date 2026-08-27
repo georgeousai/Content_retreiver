@@ -54,6 +54,12 @@ class ReelStore(Protocol):
         sub-collections. Feeds the `CollectionAssigner`."""
         ...
 
+    def find_by_author(self, name: str) -> list[SavedReel]:
+        """Every reel by one creator, matched against handle or display name.
+        A plain filter — no embedding, no ranking: "everything from X" is an
+        identity question, not a similarity one."""
+        ...
+
     def search(
         self, query_embedding: list[float], top_k: int
     ) -> list[tuple[SavedReel, float]]:

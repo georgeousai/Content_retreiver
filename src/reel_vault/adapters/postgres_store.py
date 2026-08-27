@@ -84,6 +84,16 @@ class PostgresReelStore:
                 subs.append(subcollection)
         return known
 
+    def find_by_author(self, name: str) -> list[SavedReel]:
+        wanted = name.lstrip("@")
+        rows = self._conn.execute(
+            f"SELECT {COLUMNS} FROM saved_reels "
+            "WHERE lower(author_handle) = lower(%s) OR lower(author_name) = lower(%s) "
+            "ORDER BY saved_at DESC",
+            (wanted, wanted),
+        ).fetchall()
+        return [_to_reel(row) for row in rows]
+
     def search(
         self, query_embedding: list[float], top_k: int
     ) -> list[tuple[SavedReel, float]]:

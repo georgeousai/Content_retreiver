@@ -151,6 +151,13 @@ class Vault:
         classification = self._query_intent.classify(query)
         kind = classification.kind
 
+        if kind is QueryKind.AUTHOR_FILTER and classification.author:
+            return ListAnswer(
+                query=query,
+                reels=self._store.find_by_author(classification.author),
+                author=classification.author,
+            )
+
         query_embedding = self._embedder.embed(query)
         matches = [
             reel
@@ -165,8 +172,8 @@ class Vault:
             text = self._summarizer.summarize(query, [reel.caption for reel in matches])
             return AggregateAnswer(text=text, reels=matches)
 
-        # AUTHOR_FILTER still falls back to a semantic list here; its own
-        # filter-by-author path arrives with the next ticket.
+        # An AUTHOR_FILTER reaching here named nobody the classifier could
+        # pin down, so the semantic path is the better of the two guesses.
         if kind in (QueryKind.LIST, QueryKind.AUTHOR_FILTER):
             return ListAnswer(query=query, reels=matches)
 
