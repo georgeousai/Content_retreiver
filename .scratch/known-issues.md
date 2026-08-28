@@ -10,6 +10,56 @@ broke or were missing, discovered after the fact.
 
 ---
 
+## A reel was filed on the wrong shelf, with no way to say so
+
+**Symptom:** `"Five Year Journey #fyp📈 #smallbusiness"` filed under
+`Personal Growth › Journey`; it belonged under `Entrepreneurship`. No way for
+the user to correct it — the classifier's decision was final.
+
+**Cause:** Rule 2 of the collection prompt says *"STRONGLY prefer reusing an
+existing collection"* — deliberate, to stop near-duplicate shelves
+multiplying. `Personal Growth › Journey` already existed (from *"6 months to
+become unrecognisable"*), and the caption's word *Journey* matched it exactly,
+so reuse pressure beat what `#smallbusiness` was pointing at. Both candidate
+collections already existed; the subcollection name broke the tie.
+
+**Not fixable by prompting.** A five-year journey building a small business
+genuinely *is* both Personal Growth and Entrepreneurship. There is no wording
+that gets this class of reel right for everyone — only the user knows which
+shelf they'll go looking on.
+
+**Fix:** Two ways to overrule it, because they fail differently.
+- **Reply to the reel's card** with `Entrepreneurship / Small Business` — sets
+  collection *and* subcollection, and is the only route to a shelf that
+  doesn't exist yet.
+- **A `Move` button on every card** (including the save confirmation, where a
+  misfiling is most likely to be spotted) — the one a user finds without being
+  told it exists. Buttons set collection only.
+
+The reel a card refers to is read back out of the card's own printed link,
+not from a message-id→reel map — that map would die on restart, and a user
+replying to yesterday's card would have no way to know.
+
+**Re-filing re-embeds.** Since a reel is embedded together with its
+collection, a move that rewrote only the taxonomy would leave it findable
+under the shelf it just left. Caption, tags, author, thumbnail and `saved_at`
+are carried across untouched. Verified live:
+
+```
+before: Personal Growth / Journey      after: Entrepreneurship / Small Business
+re-embedded: True   caption intact: True   picture kept: True   saved_at kept: True
+```
+
+**Known nuance, not a bug:** after the move, the reel still appears for
+`"reels about personal growth"` — at **0.40**, below all six real Personal
+Growth reels at 0.80. Its tags still include `growth`, which is accurate; a
+five-year business journey *is* about growth. Partial matches surfacing below
+exact ones is the coverage mechanism working.
+
+**Commit:** `413c7d7` — Let the user overrule where a reel was filed
+
+---
+
 ## Search ignored everything the vault knew except the caption
 
 **Symptom:** "reels about interview prep" → "Nothing in the vault matches
