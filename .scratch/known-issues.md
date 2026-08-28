@@ -10,6 +10,93 @@ broke or were missing, discovered after the fact.
 
 ---
 
+## Search ignored everything the vault knew except the caption
+
+**Symptom:** "reels about interview prep" → "Nothing in the vault matches
+that", with a reel filed under `Product Management › Interviews` and tagged
+`case prep` sitting right there. Separately, "show me all my Sales reels"-style
+queries worked, but any query naming a *sub*collection or a tag did not.
+
+**Cause:** Retrieval had exactly two paths — cosine similarity over the
+caption embedding, or an exact-name match on `collection`. `subcollection` and
+`tags` were written, indexed, and never read by any query. Measured against
+the live vault:
+
+```
+'reels about interview prep'           threshold 0.35
+  0.330  [Product Management/Interviews]  I've interviewed over 30 AI PM candidates…
+  0.285  [Product Management/Interviews]  We FIIIINNAAALLLYY have a product manager…
+  0.218  [Computer Science/Bit Manipulation]  DSA interview concept Bit Manipulation…
+```
+
+Missed by 0.02 — but not a threshold to tune. Ranking was weak in both
+directions: for the bare query `interview`, the top hit (0.361) was a caption
+that never uses the word, above "DSA interview concept" (0.299).
+
+**Fix:** Two retrieval arms, one per kind of text a reel carries. Captions
+(free prose) stay on vector similarity; collection/subcollection/tags (a short
+curated vocabulary) get keyword matching via Postgres english text search.
+Both score 0–1 so one threshold still governs; a reel matching on both keeps
+its *better* score, not the sum. Keyword hits are scored by what fraction of
+the query's terms they account for — 1-of-4 lands at 0.2 and stays out, 2-of-2
+at 0.8 — with framing words ("show me all my … reels") dropped first so
+relevance doesn't depend on phrasing. Captions are deliberately excluded from
+the keyword arm: they're long enough to share a word with any query by chance.
+
+Verified against the live vault after backfill:
+
+```
+'reels about interview prep'  ->  0.800 / 0.400 / 0.400  (3 reels)
+'show me my bit manipulation reels'  ->  0.800
+'reels about cooking'  ->  nothing, correctly
+```
+
+**Two consequences worth knowing:**
+- A reel is now embedded *with* its metadata, so it can't be embedded until
+  its collection is settled. A save paused on `NeedsCollectionChoice` no
+  longer carries an embedding.
+- `metadata_text` is written by Python, not a Postgres `GENERATED` column —
+  `array_to_string` over `tags` isn't immutable, so Postgres rejects it
+  outright.
+
+**Migration:** existing rows must be re-embedded and have `metadata_text`
+filled, or the new arm finds nothing for them. Captions/collections/tags/
+thumbnails are untouched by it. Done for the 22 rows in the dev vault.
+
+**Commit:** `b773353` — Search what a reel was filed under, not only what its caption says
+
+---
+
+## Summaries arrived as escaped entities, and read as a table of contents
+
+**Symptom:** "Dev&#x27;s Vlog Diary" shown literally. And asking to summarize
+8 Personal Growth reels returned 8 lines — one per reel, each restating that
+reel's caption under its creator's name.
+
+**Cause (a):** `reply_text(_esc(answer.text))` escaped the text but passed no
+`parse_mode`, so Telegram delivered the entity as characters. The only reply
+in the bot that escaped without declaring HTML.
+
+**Cause (b):** The prompt demanded substance over description but never said
+what the answer should be *organized around*, so one-line-per-reel was the
+path of least resistance.
+
+**Fix:** The prompt now groups by theme by default (by creator only when
+asked), opens with a direct answer, and drops captions that are bare titles.
+Formatting is a controlled vocabulary rather than free HTML — the model writes
+`## ` headings and `- ` bullets, and the renderer escapes *first*, then
+converts those markers. A model emitting HTML directly would put every reply
+one malformed tag away from Telegram rejecting the whole message, and a
+rejected send is worse than an ugly one.
+
+**Ceiling:** none of this manufactures substance for a reel whose caption is
+`"Five Year Journey #fyp📈"`. That is the audio-transcription work, not a
+prompt.
+
+**Commit:** `efdb9ca` — Let a synthesized answer be read as an answer
+
+---
+
 ## URL matcher and dedup key disagreed on what an Instagram URL is
 
 **Symptom:** Sharing `instagram.com/ukjobsinsider/reel/DchAYCOtOI0/` (a
