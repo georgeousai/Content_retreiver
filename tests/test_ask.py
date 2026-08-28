@@ -1,8 +1,14 @@
 from __future__ import annotations
 
-from reel_vault.models import AggregateAnswer, NoMatch, Saved, SingleItemAnswer
+from reel_vault.models import (
+    AggregateAnswer,
+    ListAnswer,
+    NoMatch,
+    Saved,
+    SingleItemAnswer,
+)
 from tests.conftest import make_vault
-from tests.fakes import InMemoryReelStore
+from tests.fakes import FakeSummarizer, InMemoryReelStore
 
 
 def _seeded_vault(**overrides) -> tuple:
@@ -32,7 +38,7 @@ def test_single_item_query_returns_the_matching_reel_link_and_tags() -> None:
     answer = vault.ask("find that reel about transformer architecture")
 
     assert isinstance(answer, SingleItemAnswer)
-    assert answer.reel.url == "https://instagram.com/reel/1"
+    assert answer.reel.url == "https://instagram.com/p/1"
 
 
 def test_no_match_reply_when_nothing_is_relevant() -> None:
@@ -59,3 +65,60 @@ def test_single_item_behavior_unchanged_when_aggregate_trigger_absent() -> None:
     answer = vault.ask("transformer architecture reel")
 
     assert isinstance(answer, SingleItemAnswer)
+
+
+def _vault_with_many_matching_reels(count: int, **overrides) -> tuple:
+    """Seed more reels on one topic than any single cap, so the per-intent
+    limits are actually observable."""
+    captions = {
+        f"https://instagram.com/reel/{i}": f"ai topic reel number{i}" for i in range(count)
+    }
+    store = InMemoryReelStore()
+    vault = make_vault(captions=captions, store=store, **overrides)
+    for url in captions:
+        assert isinstance(vault.save_reel(url), Saved)
+    return vault, store
+
+
+def test_list_query_returns_the_matched_reels_without_summarizing() -> None:
+    """A browse request wants the matches themselves, not a synthesized
+    paragraph — and must not spend an LLM call producing one."""
+    summarizer = FakeSummarizer()
+    vault, _ = _seeded_vault(summarizer=summarizer)
+
+    answer = vault.ask("show me my reels about transformers")
+
+    assert isinstance(answer, ListAnswer)
+    assert any("transformer" in reel.caption for reel in answer.reels)
+    assert summarizer.calls == []
+
+
+def test_list_query_is_not_capped_at_the_single_item_limit() -> None:
+    """Regression: every query used to share top_k=5, so 'show me all' silently
+    dropped everything past the fifth match."""
+    vault, _ = _vault_with_many_matching_reels(20)
+
+    answer = vault.ask("show me my ai topic reels")
+
+    assert isinstance(answer, ListAnswer)
+    assert len(answer.reels) == 20
+
+
+def test_aggregate_query_is_capped_below_the_list_limit() -> None:
+    """Every matched caption goes into one Groq prompt, so aggregate stays
+    bounded well below the (free) list cap."""
+    vault, _ = _vault_with_many_matching_reels(20)
+
+    answer = vault.ask("summarize my ai topic reels")
+
+    assert isinstance(answer, AggregateAnswer)
+    assert len(answer.reels) == 15
+
+
+def test_per_intent_caps_are_tunable() -> None:
+    vault, _ = _vault_with_many_matching_reels(20, top_k_list=8)
+
+    answer = vault.ask("show me my ai topic reels")
+
+    assert isinstance(answer, ListAnswer)
+    assert len(answer.reels) == 8

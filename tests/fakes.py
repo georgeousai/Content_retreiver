@@ -4,9 +4,22 @@ per the spec's testing decisions (tests target the seam, not the adapters)."""
 from __future__ import annotations
 
 import math
+import re
 import zlib
+from collections.abc import Mapping
+from dataclasses import replace
 
-from reel_vault.models import CollectionAssignment, ExtractedPost, SavedReel
+from reel_vault.models import (
+    CollectionAssignment,
+    Correction,
+    ExtractedPost,
+    NeighbourPlacement,
+    QueryClassification,
+    QueryKind,
+    SavedReel,
+    SummarySource,
+)
+from reel_vault.search import keyword_score, merge_hits, metadata_text
 from reel_vault.urls import normalize_reel_url
 
 
@@ -15,7 +28,7 @@ class FakeCaptionFetcher:
     failure. Plain strings are accepted as a shorthand for a caption with no
     author attached."""
 
-    def __init__(self, posts: dict[str, ExtractedPost | str | None]) -> None:
+    def __init__(self, posts: Mapping[str, ExtractedPost | str | None]) -> None:
         self._posts = posts
 
     def fetch(self, url: str) -> ExtractedPost | None:
@@ -59,9 +72,16 @@ class FakeCollectionAssigner:
         self._assignments = assignments or {}
         self._default_collection = default_collection
         self.seen_known: list[dict[str, list[str]]] = []
+        self.seen_neighbours: list[list[NeighbourPlacement]] = []
 
-    def assign(self, caption: str, known: dict[str, list[str]]) -> CollectionAssignment:
+    def assign(
+        self,
+        caption: str,
+        known: dict[str, list[str]],
+        neighbours: list[NeighbourPlacement],
+    ) -> CollectionAssignment:
         self.seen_known.append(known)
+        self.seen_neighbours.append(neighbours)
         if caption in self._assignments:
             return self._assignments[caption]
 
@@ -84,8 +104,10 @@ class FakeEmbedder:
 
     def __init__(self, dim: int = 256) -> None:
         self._dim = dim
+        self.calls: list[str] = []
 
     def embed(self, text: str) -> list[float]:
+        self.calls.append(text)
         vec = [0.0] * self._dim
         for word in text.lower().split():
             vec[zlib.crc32(word.encode()) % self._dim] += 1.0
@@ -96,12 +118,51 @@ class FakeEmbedder:
 class InMemoryReelStore:
     def __init__(self) -> None:
         self._by_url: dict[str, SavedReel] = {}
+        self._corrections: dict[str, list[Correction]] = {}
+        self.search_calls: list[int] = []
 
     def find_by_url(self, normalized_url: str) -> SavedReel | None:
         return self._by_url.get(normalized_url)
 
-    def save(self, reel: SavedReel) -> None:
-        self._by_url[normalize_reel_url(reel.url)] = reel
+    def save(self, reel: SavedReel) -> bool:
+        key = normalize_reel_url(reel.url)
+        if key in self._by_url:
+            return False
+        self._by_url[key] = reel
+        return True
+
+    def update(self, reel: SavedReel) -> None:
+        if reel.url in self._by_url:
+            self._by_url[reel.url] = reel
+
+    def find_similar_captions(
+        self, caption_embedding: list[float], limit: int
+    ) -> list[NeighbourPlacement]:
+        scored = [
+            (reel, _cosine(caption_embedding, reel.caption_embedding))
+            for reel in self._by_url.values()
+            if reel.caption_embedding
+        ]
+        scored.sort(key=lambda pair: pair[1], reverse=True)
+        return [
+            NeighbourPlacement(
+                caption=reel.caption,
+                collection=reel.collection,
+                subcollection=reel.subcollection,
+                similarity=similarity,
+                user_placed=reel.user_placed,
+            )
+            for reel, similarity in scored[:limit]
+        ]
+
+    def record_correction(self, correction: Correction) -> None:
+        self._corrections.setdefault(correction.url, []).append(correction)
+
+    def pop_last_correction(self, normalized_url: str) -> Correction | None:
+        history = self._corrections.get(normalized_url)
+        if not history:
+            return None
+        return history.pop()
 
     def known_collections(self) -> dict[str, list[str]]:
         known: dict[str, list[str]] = {}
@@ -111,32 +172,127 @@ class InMemoryReelStore:
                 subs.append(reel.subcollection)
         return known
 
+    def set_thumbnail_ref(self, normalized_url: str, thumbnail_ref: str) -> None:
+        reel = self._by_url.get(normalized_url)
+        if reel is not None:
+            self._by_url[normalized_url] = replace(reel, thumbnail_ref=thumbnail_ref)
+
+    def find_by_collection(self, collection: str) -> list[SavedReel]:
+        return [
+            reel
+            for reel in self._by_url.values()
+            if reel.collection.casefold() == collection.casefold()
+        ]
+
+    def find_by_author(self, name: str) -> list[SavedReel]:
+        wanted = name.casefold().lstrip("@")
+        return [
+            reel
+            for reel in self._by_url.values()
+            if wanted in {
+                (reel.author_handle or "").casefold(),
+                (reel.author_name or "").casefold(),
+            }
+        ]
+
     def search(
-        self, query_embedding: list[float], top_k: int
+        self, query_embedding: list[float], terms: list[str], top_k: int
     ) -> list[tuple[SavedReel, float]]:
+        self.search_calls.append(top_k)
         scored = [
             (reel, _cosine(query_embedding, reel.embedding))
             for reel in self._by_url.values()
         ]
         scored.sort(key=lambda pair: pair[1], reverse=True)
-        return scored[:top_k]
+        return merge_hits(scored[:top_k], self._keyword_hits(terms), top_k)
+
+    def _keyword_hits(self, terms: list[str]) -> list[tuple[SavedReel, float]]:
+        """The keyword arm, standing in for Postgres's english text search.
+        `_stems_alike` is a deliberately crude substitute for real stemming —
+        enough that "interview" reaches a sub-collection named "Interviews",
+        which is the behaviour these tests are about."""
+        hits = []
+        for reel in self._by_url.values():
+            words = set(
+                metadata_text(reel.tags, reel.collection, reel.subcollection)
+                .casefold()
+                .split()
+            )
+            matched = sum(
+                any(_stems_alike(term, word) for word in words) for term in terms
+            )
+            score = keyword_score(matched, len(terms))
+            if score > 0:
+                hits.append((reel, score))
+        return hits
+
+
+def _stems_alike(term: str, word: str) -> bool:
+    """Whether a query term and a metadata word are the same word. The length
+    floor keeps a prefix rule from making every short word match everything —
+    without it "ai" would match "aim", "air", and "aircraft"."""
+    if term == word:
+        return True
+    return (len(term) >= 4 and word.startswith(term)) or (
+        len(word) >= 4 and term.startswith(word)
+    )
 
 
 class FakeQueryIntent:
-    """Aggregate iff the query contains any of a caller-supplied set of
-    trigger phrases; defaults to keywords like 'all'/'summarize'."""
+    """Keyword-driven stand-in for the LLM classifier. Checks in priority
+    order — an @handle means an author filter, then browse phrasing, then
+    aggregate phrasing — because real queries overlap ('show me all my X
+    reels' browses; 'give me all the X from my Y' synthesizes)."""
 
-    def __init__(self, aggregate_triggers: tuple[str, ...] = ("all", "summarize", "every")) -> None:
-        self._triggers = aggregate_triggers
+    def __init__(
+        self,
+        aggregate_triggers: tuple[str, ...] = ("give me all", "summarize", "every"),
+        list_triggers: tuple[str, ...] = ("show me", "list ", "browse"),
+        classifications: Mapping[str, QueryClassification] | None = None,
+    ) -> None:
+        self._aggregate_triggers = aggregate_triggers
+        self._list_triggers = list_triggers
+        self._classifications = classifications or {}
 
-    def is_aggregate(self, query: str) -> bool:
+    def classify(self, query: str, collections: list[str]) -> QueryClassification:
+        if query in self._classifications:
+            return self._classifications[query]
+
         lowered = query.lower()
-        return any(trigger in lowered for trigger in self._triggers)
+
+        handle = re.search(r"@([\w.]+(?: [A-Z][\w.]*)*)", query)
+        if handle:
+            return QueryClassification(
+                kind=QueryKind.AUTHOR_FILTER, author=handle.group(1)
+            )
+
+        # Naming an existing collection scopes the answer to that shelf,
+        # whatever shape of answer was asked for.
+        named = next(
+            (name for name in collections if name.casefold() in lowered), None
+        )
+        if any(trigger in lowered for trigger in self._list_triggers):
+            return QueryClassification(kind=QueryKind.LIST, collection=named)
+        if any(trigger in lowered for trigger in self._aggregate_triggers):
+            return QueryClassification(kind=QueryKind.AGGREGATE, collection=named)
+        return QueryClassification(kind=QueryKind.SINGLE)
 
 
 class FakeSummarizer:
-    def summarize(self, query: str, captions: list[str]) -> str:
-        return " | ".join(captions)
+    """Records what it was asked to summarize, so tests can assert both that
+    a list query never reaches it and that aggregate queries hand it the
+    right captions and authors. Echoes the attribution it was given, so a
+    test can tell whether author actually reached the summarizer."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, list[SummarySource]]] = []
+
+    def summarize(self, query: str, sources: list[SummarySource]) -> str:
+        self.calls.append((query, list(sources)))
+        return " | ".join(
+            f"{source.caption} (by {source.author_handle or 'unknown'})"
+            for source in sources
+        )
 
 
 def _cosine(a: list[float], b: list[float]) -> float:

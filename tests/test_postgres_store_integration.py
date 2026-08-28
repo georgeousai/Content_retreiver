@@ -70,6 +70,7 @@ def _reel(
     subcollection: str | None = None,
     author_handle: str | None = None,
     author_name: str | None = None,
+    thumbnail_ref: str | None = None,
 ) -> SavedReel:
     return SavedReel(
         url=url,
@@ -80,6 +81,7 @@ def _reel(
         subcollection=subcollection,
         author_handle=author_handle,
         author_name=author_name,
+        thumbnail_ref=thumbnail_ref,
     )
 
 
@@ -99,6 +101,7 @@ def test_save_then_find_round_trips_all_fields(store) -> None:
             subcollection="RAG",
             author_handle="someone",
             author_name="Some One",
+            thumbnail_ref="AgACAgQAAx-file-id",
         )
     )
 
@@ -111,6 +114,7 @@ def test_save_then_find_round_trips_all_fields(store) -> None:
     assert found.subcollection == "RAG"
     assert found.author_handle == "someone"
     assert found.author_name == "Some One"
+    assert found.thumbnail_ref == "AgACAgQAAx-file-id"
     assert len(found.embedding) == 384
     assert found.embedding == pytest.approx(embedding, abs=1e-6)
 
@@ -139,7 +143,7 @@ def test_search_results_carry_collection_and_author(store) -> None:
         )
     )
 
-    results = store.search(embedding, top_k=1)
+    results = store.search(embedding, [], top_k=1)
 
     reel, _ = results[0]
     assert reel.collection == "AI"
@@ -152,12 +156,55 @@ def test_search_returns_similarity_scores(store) -> None:
     embedding = [0.0] * 383 + [1.0]
     store.save(_reel(url, embedding=embedding))
 
-    results = store.search(embedding, top_k=5)
+    results = store.search(embedding, [], top_k=5)
 
     assert results, "expected at least the reel just saved"
     top_reel, top_similarity = results[0]
     assert top_reel.url == url
     assert top_similarity == pytest.approx(1.0, abs=1e-4)
+
+
+def test_find_by_author_matches_handle_or_display_name_case_insensitively(store) -> None:
+    embedding = [0.4] * 384
+    handle = f"pytest_handle_{uuid.uuid4().hex[:8]}"
+    display = f"Pytest Display {uuid.uuid4().hex[:8]}"
+    by_handle = _unique_url()
+    by_name = _unique_url()
+    store.save(_reel(by_handle, embedding=embedding, author_handle=handle))
+    store.save(_reel(by_name, embedding=embedding, author_name=display))
+    store.save(_reel(_unique_url(), embedding=embedding, author_handle="someone_else"))
+
+    assert [r.url for r in store.find_by_author(handle.upper())] == [by_handle]
+    assert [r.url for r in store.find_by_author(display.lower())] == [by_name]
+    # A leading @ is how the user types it; it must not defeat the match.
+    assert [r.url for r in store.find_by_author(f"@{handle}")] == [by_handle]
+
+
+def test_find_by_collection_returns_the_whole_shelf_case_insensitively(store) -> None:
+    embedding = [0.6] * 384
+    collection = f"Pytest{uuid.uuid4().hex[:8]}"
+    first, second = _unique_url(), _unique_url()
+    store.save(_reel(first, embedding=embedding, collection=collection))
+    store.save(_reel(second, embedding=embedding, collection=collection))
+    store.save(_reel(_unique_url(), embedding=embedding, collection="Other"))
+
+    found = store.find_by_collection(collection.lower())
+
+    assert {reel.url for reel in found} == {first, second}
+
+
+def test_set_thumbnail_ref_attaches_a_picture_to_an_existing_reel(store) -> None:
+    url = _unique_url()
+    store.save(_reel(url, embedding=[0.5] * 384))
+    assert store.find_by_url(url).thumbnail_ref is None
+
+    store.set_thumbnail_ref(url, "AgACAgQAAx-file-id")
+
+    assert store.find_by_url(url).thumbnail_ref == "AgACAgQAAx-file-id"
+
+
+def test_find_by_author_returns_empty_for_an_unknown_creator(store) -> None:
+    assert store.find_by_author(f"nobody_{uuid.uuid4().hex[:8]}") == []
 
 
 def test_duplicate_save_does_not_create_a_second_row(store) -> None:

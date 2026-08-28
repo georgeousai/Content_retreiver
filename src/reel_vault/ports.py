@@ -7,7 +7,15 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from reel_vault.models import CollectionAssignment, ExtractedPost, SavedReel
+from reel_vault.models import (
+    CollectionAssignment,
+    Correction,
+    ExtractedPost,
+    NeighbourPlacement,
+    QueryClassification,
+    SavedReel,
+    SummarySource,
+)
 
 
 class CaptionFetcher(Protocol):
@@ -24,11 +32,21 @@ class Tagger(Protocol):
 
 class CollectionAssigner(Protocol):
     def assign(
-        self, caption: str, known: dict[str, list[str]]
+        self,
+        caption: str,
+        known: dict[str, list[str]],
+        neighbours: list[NeighbourPlacement],
     ) -> CollectionAssignment:
-        """Place a caption in the taxonomy. `known` maps each existing
-        collection to its existing sub-collections, so implementations can
-        reuse what is already there instead of coining near-duplicates."""
+        """Place a caption in the taxonomy.
+
+        `known` maps each existing collection to its existing sub-collections,
+        so implementations can reuse what is already there instead of coining
+        near-duplicates. `neighbours` are the most similar captions already
+        filed, with where each went — the names alone say what shelves exist
+        but nothing about what actually goes on them, which is how a reel
+        captioned "Five Year Journey #smallbusiness" was filed under a
+        Journey sub-collection that had nothing to do with it.
+        """
         ...
 
 
@@ -41,7 +59,41 @@ class ReelStore(Protocol):
     def find_by_url(self, normalized_url: str) -> SavedReel | None:
         ...
 
-    def save(self, reel: SavedReel) -> None:
+    def save(self, reel: SavedReel) -> bool:
+        """Persist a new reel. Returns False if one with this URL already
+        existed, so a racing caller can tell "I saved it" from "someone
+        already had"."""
+        ...
+
+    def find_similar_captions(
+        self, caption_embedding: list[float], limit: int
+    ) -> list[NeighbourPlacement]:
+        """The already-filed reels whose captions most resemble this one.
+
+        Compared caption-to-caption rather than against the retrieval
+        embedding, which also covers collection and tags and would therefore
+        favour whichever shelf happens to share the caption's vocabulary.
+        """
+        ...
+
+    def record_correction(self, correction: Correction) -> None:
+        """Remember that the user moved a reel, so the move can be undone."""
+        ...
+
+    def pop_last_correction(self, normalized_url: str) -> Correction | None:
+        """Take back the most recent move of this reel, removing it from the
+        record. Removed rather than kept-and-reversed: after an undo the reel
+        sits where it was originally put, and a lingering record would claim
+        a person chose that."""
+        ...
+
+    def update(self, reel: SavedReel) -> None:
+        """Overwrite an already-saved reel, keyed on its URL.
+
+        Re-filing is not a taxonomy-only edit: a reel is embedded and indexed
+        together with the collection it sits on, so moving it between shelves
+        has to rewrite what it is findable by, not just what it is labelled.
+        """
         ...
 
     def known_collections(self) -> dict[str, list[str]]:
@@ -49,20 +101,54 @@ class ReelStore(Protocol):
         sub-collections. Feeds the `CollectionAssigner`."""
         ...
 
+    def set_thumbnail_ref(self, normalized_url: str, thumbnail_ref: str) -> None:
+        """Attach a durable picture reference to an already-saved reel."""
+        ...
+
+    def find_by_author(self, name: str) -> list[SavedReel]:
+        """Every reel by one creator, matched against handle or display name.
+        A plain filter — no embedding, no ranking: "everything from X" is an
+        identity question, not a similarity one."""
+        ...
+
+    def find_by_collection(self, collection: str) -> list[SavedReel]:
+        """Every reel filed under one collection. Also a plain filter: the
+        taxonomy was decided at save time, so browsing it is a lookup rather
+        than a guess."""
+        ...
+
     def search(
-        self, query_embedding: list[float], top_k: int
+        self, query_embedding: list[float], terms: list[str], top_k: int
     ) -> list[tuple[SavedReel, float]]:
-        """Return up to `top_k` (reel, cosine_similarity) pairs, best match first."""
+        """Return up to `top_k` (reel, relevance) pairs, best match first.
+
+        Hybrid: `query_embedding` matches captions by meaning, `terms` match
+        the curated metadata (collection, sub-collection, tags) by word, and
+        the two rankings are merged. Neither arm alone was enough — a reel
+        filed under "Interviews" was unreachable by a query about interviews
+        because only captions were searched, while a reel whose caption is
+        "5yrs ago this wasn't a thing" is unreachable by word.
+
+        Scores from both arms share one 0-1 scale so the caller can apply a
+        single relevance threshold; see `reel_vault.search`.
+        """
         ...
 
 
 class QueryIntent(Protocol):
-    def is_aggregate(self, query: str) -> bool:
-        """True if the query asks for a synthesized answer across many reels
-        rather than a single matching reel."""
+    def classify(self, query: str, collections: list[str]) -> QueryClassification:
+        """Decide what shape of answer the query wants — one reel, a browsable
+        list, a synthesized answer across many, or everything by one author —
+        plus who, and which existing collection the user named, if any.
+        `collections` is what the vault actually holds, so "my Sales reels"
+        can be recognized as naming a shelf rather than describing a topic.
+        One call, so classification never costs two LLM round-trips."""
         ...
 
 
 class Summarizer(Protocol):
-    def summarize(self, query: str, captions: list[str]) -> str:
+    def summarize(self, query: str, sources: list[SummarySource]) -> str:
+        """Synthesize an answer from the matched reels. Sources carry their
+        author so the answer can attribute across creators — but only ever
+        from what the captions themselves say."""
         ...

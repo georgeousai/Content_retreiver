@@ -8,19 +8,27 @@ Telegram, Groq, Postgres, or any other concrete integration.
 
 from __future__ import annotations
 
+import logging
+from dataclasses import replace
+
 from reel_vault.models import (
     UNCATEGORIZED,
     AggregateAnswer,
     AlreadySaved,
     Answer,
+    Correction,
     ExtractedPost,
     ExtractionFailed,
+    ListAnswer,
     NeedsCollectionChoice,
     NoMatch,
+    QueryClassification,
+    QueryKind,
     Saved,
     SavedReel,
     SaveResult,
     SingleItemAnswer,
+    SummarySource,
 )
 from reel_vault.ports import (
     CaptionFetcher,
@@ -31,10 +39,31 @@ from reel_vault.ports import (
     Summarizer,
     Tagger,
 )
+from reel_vault.search import embedding_text, search_terms
 from reel_vault.urls import normalize_reel_url
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_MATCH_THRESHOLD = 0.35
-DEFAULT_TOP_K = 5
+
+# One cap per intent, not one shared cap: a list costs only a database read, so
+# it can be generous, while every reel in an aggregate becomes part of a single
+# LLM prompt — the free-tier budget, not relevance, is what bounds it.
+DEFAULT_TOP_K_SINGLE = 5
+DEFAULT_TOP_K_LIST = 50
+DEFAULT_TOP_K_AGGREGATE = 15
+
+# How many already-filed reels are shown to the collection assigner as
+# evidence. Enough to show a pattern, few enough that one loud neighbour
+# cannot decide the answer on its own.
+DEFAULT_NEIGHBOUR_COUNT = 5
+
+# How alike two captions must be before one is worth citing as evidence
+# about the other. Without a floor, a genuinely novel reel is handed five
+# unrelated placements scoring 0.15-0.18 and told they are precedent —
+# noise presented in the same shape as a real signal, which is worse than
+# saying nothing.
+DEFAULT_NEIGHBOUR_FLOOR = 0.25
 
 
 class Vault:
@@ -49,7 +78,11 @@ class Vault:
         query_intent: QueryIntent,
         summarizer: Summarizer,
         match_threshold: float = DEFAULT_MATCH_THRESHOLD,
-        top_k: int = DEFAULT_TOP_K,
+        top_k_single: int = DEFAULT_TOP_K_SINGLE,
+        top_k_list: int = DEFAULT_TOP_K_LIST,
+        top_k_aggregate: int = DEFAULT_TOP_K_AGGREGATE,
+        neighbour_count: int = DEFAULT_NEIGHBOUR_COUNT,
+        neighbour_floor: float = DEFAULT_NEIGHBOUR_FLOOR,
     ) -> None:
         self._caption_fetcher = caption_fetcher
         self._tagger = tagger
@@ -59,7 +92,16 @@ class Vault:
         self._query_intent = query_intent
         self._summarizer = summarizer
         self._match_threshold = match_threshold
-        self._top_k = top_k
+        self._neighbour_count = neighbour_count
+        self._neighbour_floor = neighbour_floor
+        self._top_k = {
+            QueryKind.SINGLE: top_k_single,
+            QueryKind.LIST: top_k_list,
+            QueryKind.AGGREGATE: top_k_aggregate,
+            # Author queries are a plain filter, not a similarity search, so
+            # this bounds the rows handed back rather than the search itself.
+            QueryKind.AUTHOR_FILTER: top_k_list,
+        }
 
     def save_reel(self, url: str, *, manual_caption: str | None = None) -> SaveResult:
         normalized = normalize_reel_url(url)
@@ -78,34 +120,95 @@ class Vault:
 
         tags = self._tagger.tag(post.caption)
         known = self._store.known_collections()
-        assignment = self._collection_assigner.assign(post.caption, known)
-        # Computed regardless of outcome so a follow-up `assign_collection`
-        # call never needs to re-tag or re-embed.
-        embedding = self._embedder.embed(post.caption)
+        # Where comparable reels actually ended up, which the list of
+        # collection names cannot convey: names say what shelves exist, not
+        # what goes on them.
+        caption_embedding = self._embedder.embed(post.caption)
+        neighbours = [
+            neighbour
+            for neighbour in self._store.find_similar_captions(
+                caption_embedding, self._neighbour_count
+            )
+            if neighbour.similarity >= self._neighbour_floor
+        ]
+        assignment = self._collection_assigner.assign(post.caption, known, neighbours)
 
         if assignment.collection == UNCATEGORIZED:
+            # Nothing is embedded yet: a reel is embedded together with the
+            # collection it is filed under, and that is exactly what this
+            # outcome is asking the user for.
             return NeedsCollectionChoice(
                 url=normalized,
                 caption=post.caption,
                 tags=tags,
-                embedding=embedding,
+                caption_embedding=caption_embedding,
                 author_handle=post.author_handle,
                 author_name=post.author_name,
                 known_collections=known,
+                thumbnail_url=post.thumbnail_url,
             )
 
-        reel = SavedReel(
+        reel = self._build_reel(
             url=normalized,
             caption=post.caption,
             tags=tags,
-            embedding=embedding,
             collection=assignment.collection,
             subcollection=assignment.subcollection,
             author_handle=post.author_handle,
             author_name=post.author_name,
+            caption_embedding=caption_embedding,
         )
-        self._store.save(reel)
-        return Saved(reel=reel)
+        return self._persist(reel, thumbnail_url=post.thumbnail_url)
+
+    def _build_reel(
+        self,
+        *,
+        url: str,
+        caption: str,
+        tags: list[str],
+        collection: str,
+        subcollection: str | None,
+        author_handle: str | None,
+        author_name: str | None,
+        caption_embedding: list[float] | None = None,
+        user_placed: bool = False,
+    ) -> SavedReel:
+        """Assemble a reel with both of the embeddings it needs.
+
+        The single place either is computed, so the text they cover cannot
+        differ between a reel saved outright and one the user placed by hand.
+        The retrieval embedding covers the caption plus the shelf and tags;
+        the caption embedding covers only the caption, and is what later
+        reels are compared against when deciding where they belong.
+        """
+        return SavedReel(
+            url=url,
+            caption=caption,
+            tags=tags,
+            embedding=self._embedder.embed(
+                embedding_text(caption, tags, collection, subcollection)
+            ),
+            caption_embedding=(
+                caption_embedding
+                if caption_embedding is not None
+                else self._embedder.embed(caption)
+            ),
+            collection=collection,
+            subcollection=subcollection,
+            author_handle=author_handle,
+            author_name=author_name,
+            user_placed=user_placed,
+        )
+
+    def _persist(self, reel: SavedReel, *, thumbnail_url: str | None) -> SaveResult:
+        """Write the reel, unless someone beat us to that URL between our
+        duplicate check and now — two bot processes, a double-tap, or (later)
+        two users on the same reel. Claiming "Saved!" for a write that did
+        nothing is worse than being late to notice."""
+        if not self._store.save(reel):
+            existing = self._store.find_by_url(reel.url)
+            return AlreadySaved(reel=existing if existing is not None else reel)
+        return Saved(reel=reel, thumbnail_url=thumbnail_url)
 
     def assign_collection(
         self,
@@ -113,36 +216,177 @@ class Vault:
         *,
         collection: str,
         subcollection: str | None = None,
-    ) -> Saved:
+    ) -> SaveResult:
         """Finish a save that `save_reel` paused on `NeedsCollectionChoice`,
         now that the caller (the bot, having asked the user) supplies where
         it belongs."""
-        reel = SavedReel(
+        reel = self._build_reel(
             url=pending.url,
             caption=pending.caption,
             tags=pending.tags,
-            embedding=pending.embedding,
             collection=collection,
             subcollection=subcollection,
             author_handle=pending.author_handle,
             author_name=pending.author_name,
+            caption_embedding=pending.caption_embedding,
+            # The user answered the question themselves, so this placement
+            # carries their authority when later reels are placed near it.
+            user_placed=True,
         )
-        self._store.save(reel)
-        return Saved(reel=reel)
+        return self._persist(reel, thumbnail_url=pending.thumbnail_url)
+
+    def collections(self) -> list[str]:
+        """Every collection the vault holds, for offering the user a choice."""
+        return sorted(self._store.known_collections())
+
+    def refile(
+        self, url: str, *, collection: str, subcollection: str | None = None
+    ) -> SavedReel | None:
+        """Move an already-saved reel to a different shelf, or None if the
+        vault doesn't have it.
+
+        Where a reel belongs is often genuinely ambiguous — a five-year
+        journey building a small business is both Personal Growth and
+        Entrepreneurship — so this exists because no classifier, however
+        well prompted, can be right for a user who disagrees with it.
+
+        The reel is re-embedded rather than relabelled: since a reel is
+        embedded together with its collection, a move that only rewrote the
+        taxonomy would leave it still findable under the shelf it just left.
+        """
+        normalized = normalize_reel_url(url)
+        existing = self._store.find_by_url(normalized)
+        if existing is None:
+            return None
+
+        moved = replace(
+            existing,
+            collection=collection,
+            subcollection=subcollection,
+            user_placed=True,
+            embedding=self._embedder.embed(
+                embedding_text(
+                    existing.caption, existing.tags, collection, subcollection
+                )
+            ),
+        )
+        self._store.update(moved)
+        self._store.record_correction(
+            Correction(
+                url=normalized,
+                from_collection=existing.collection,
+                from_subcollection=existing.subcollection,
+                to_collection=collection,
+                to_subcollection=subcollection,
+                from_user_placed=existing.user_placed,
+            )
+        )
+        return moved
+
+    def undo_last_move(self, url: str) -> SavedReel | None:
+        """Put a reel back where it was before the last move, or None if it
+        has not been moved (or is not in the vault at all).
+
+        The record of the move is removed rather than reversed: afterwards
+        the reel sits where it was originally put, and a correction left
+        standing would claim a person had chosen that. Restoring
+        `user_placed` from the record matters for the same reason — undoing
+        a move must not leave behind a placement carrying an authority
+        nobody exercised.
+        """
+        normalized = normalize_reel_url(url)
+        correction = self._store.pop_last_correction(normalized)
+        if correction is None:
+            return None
+
+        existing = self._store.find_by_url(normalized)
+        if existing is None:
+            return None
+
+        restored = replace(
+            existing,
+            collection=correction.from_collection,
+            subcollection=correction.from_subcollection,
+            user_placed=correction.from_user_placed,
+            embedding=self._embedder.embed(
+                embedding_text(
+                    existing.caption,
+                    existing.tags,
+                    correction.from_collection,
+                    correction.from_subcollection,
+                )
+            ),
+        )
+        self._store.update(restored)
+        return restored
+
+    def attach_thumbnail(self, url: str, thumbnail_ref: str) -> None:
+        """Record a durable reference to a saved reel's picture. Only the
+        transport layer can mint one, so it is supplied after the save rather
+        than fetched during it."""
+        self._store.set_thumbnail_ref(normalize_reel_url(url), thumbnail_ref)
 
     def ask(self, query: str) -> Answer:
-        query_embedding = self._embedder.embed(query)
+        known = list(self._store.known_collections())
+        classification = self._query_intent.classify(query, known)
+        kind = classification.kind
+
+        if kind is QueryKind.AUTHOR_FILTER and classification.author:
+            found = self._store.find_by_author(classification.author)
+            return ListAnswer(
+                query=query,
+                reels=found[: self._top_k[kind]],
+                author=classification.author,
+            )
+
+        if classification.collection:
+            return self._answer_from_collection(query, classification)
+
         matches = [
             reel
-            for reel, similarity in self._store.search(query_embedding, self._top_k)
-            if similarity >= self._match_threshold
+            for reel, relevance in self._store.search(
+                self._embedder.embed(query), search_terms(query), self._top_k[kind]
+            )
+            if relevance >= self._match_threshold
         ]
 
         if not matches:
             return NoMatch(query=query)
 
-        if self._query_intent.is_aggregate(query):
-            text = self._summarizer.summarize(query, [reel.caption for reel in matches])
-            return AggregateAnswer(text=text, reels=matches)
+        if kind is QueryKind.AGGREGATE:
+            sources = [SummarySource.of(reel) for reel in matches]
+            return AggregateAnswer(
+                text=self._summarizer.summarize(query, sources), reels=matches
+            )
+
+        # An AUTHOR_FILTER reaching here named nobody the classifier could
+        # pin down, so the semantic path is the better of the two guesses.
+        if kind in (QueryKind.LIST, QueryKind.AUTHOR_FILTER):
+            return ListAnswer(query=query, reels=matches)
 
         return SingleItemAnswer(reel=matches[0])
+
+    def _answer_from_collection(
+        self, query: str, classification: QueryClassification
+    ) -> Answer:
+        """The user named a shelf, so read the shelf. Similarity ranking has
+        nothing to add here and plenty to lose: "5yrs ago this wasn't a thing"
+        genuinely belongs to Sales, but no query about sales will ever score
+        close enough to a caption like that to clear the threshold."""
+        collection = classification.collection or ""
+        kind = classification.kind
+        reels = self._store.find_by_collection(collection)[: self._top_k[kind]]
+
+        if not reels:
+            return NoMatch(query=query)
+
+        if kind is QueryKind.AGGREGATE:
+            sources = [SummarySource.of(reel) for reel in reels]
+            return AggregateAnswer(
+                text=self._summarizer.summarize(query, sources), reels=reels
+            )
+
+        if kind is QueryKind.SINGLE:
+            return SingleItemAnswer(reel=reels[0])
+
+        return ListAnswer(query=query, reels=reels, collection=collection)

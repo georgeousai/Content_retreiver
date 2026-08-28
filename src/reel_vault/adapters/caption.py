@@ -47,6 +47,7 @@ class OEmbedCaptionFetcher:
             caption=caption,
             author_handle=data.get("author_name"),
             author_name=data.get("author_name"),
+            thumbnail_url=data.get("thumbnail_url"),
         )
 
 
@@ -79,6 +80,7 @@ class YtDlpCaptionFetcher:
             # the display name (e.g. "Bashiri Smith").
             author_handle=info.get("channel") or info.get("uploader_id"),
             author_name=info.get("uploader"),
+            thumbnail_url=info.get("thumbnail"),
         )
 
 

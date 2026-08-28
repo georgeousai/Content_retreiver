@@ -17,7 +17,7 @@ def test_saving_a_new_reel_produces_a_tagged_embedded_record() -> None:
     assert result.reel.caption == "A caption about transformers"
     assert result.reel.tags == ["ai", "transformers"]
     assert len(result.reel.embedding) > 0
-    assert result.reel.url == "https://instagram.com/reel/ABC"
+    assert result.reel.url == "https://instagram.com/p/ABC"
 
 
 def test_saving_a_duplicate_url_returns_existing_record_without_new_row() -> None:
@@ -70,6 +70,26 @@ def test_manual_caption_flows_through_same_tagging_and_storage_path() -> None:
     assert isinstance(result, Saved)
     assert result.reel.caption == "pasted caption text"
     assert result.reel.tags == ["manual"]
+
+
+def test_losing_a_race_to_the_same_url_reports_already_saved() -> None:
+    """Two bot processes (or a double-tap) can both pass the duplicate check
+    before either writes. The one whose insert does nothing must not claim
+    it saved the reel — observed live as two "Saved!" replies for one row.
+    """
+    store = InMemoryReelStore()
+    vault = make_vault(
+        captions={"https://instagram.com/reel/RACE": "a caption about ai"},
+        store=store,
+    )
+    winner = vault.save_reel("https://instagram.com/reel/RACE")
+    assert isinstance(winner, Saved)
+
+    # The loser reached save() with its own record, the row already there.
+    loser = vault._persist(winner.reel, thumbnail_url=None)
+
+    assert isinstance(loser, AlreadySaved)
+    assert loser.reel.url == winner.reel.url
 
 
 def test_manual_caption_still_honors_duplicate_check() -> None:

@@ -9,8 +9,9 @@ from reel_vault.models import (
     NeedsCollectionChoice,
     Saved,
 )
+from reel_vault.search import embedding_text
 from tests.conftest import make_vault
-from tests.fakes import FakeCollectionAssigner, InMemoryReelStore
+from tests.fakes import FakeCollectionAssigner, FakeEmbedder, InMemoryReelStore
 
 URL = "https://instagram.com/reel/ABC"
 
@@ -131,15 +132,14 @@ def test_unsure_assignment_pauses_the_save_and_asks_instead_of_guessing() -> Non
     result = vault.save_reel(URL)
 
     assert isinstance(result, NeedsCollectionChoice)
-    assert result.url == URL
+    assert result.url == "https://instagram.com/p/ABC"
     assert result.caption == "totally unclassifiable"
     assert result.tags == ["misc"]
-    assert len(result.embedding) > 0
     # Nothing was written — the row doesn't exist until the user decides.
     assert store.find_by_url(URL) is None
 
 
-def test_assign_collection_finishes_the_save_without_recomputing_anything() -> None:
+def test_assign_collection_finishes_the_save_and_writes_the_row() -> None:
     store = InMemoryReelStore()
     vault = make_vault(
         captions={URL: "totally unclassifiable"},
@@ -156,7 +156,34 @@ def test_assign_collection_finishes_the_save_without_recomputing_anything() -> N
     assert result.reel.collection == "Random Musings"
     assert result.reel.subcollection is None
     assert result.reel.caption == "totally unclassifiable"
-    assert store.find_by_url(URL) is not None
+    assert store.find_by_url("https://instagram.com/p/ABC") is not None
+
+
+def test_a_reel_placed_by_hand_is_embedded_with_the_collection_it_was_given() -> None:
+    """A reel is embedded together with the shelf it sits on, so a save that
+    paused to ask where it belongs cannot embed until the user answers — and
+    must then embed with the answer, not with the caption alone."""
+    embedder = FakeEmbedder()
+    vault = make_vault(
+        captions={URL: "totally unclassifiable"},
+        tags_by_caption={"totally unclassifiable": ["misc"]},
+        assignments={"totally unclassifiable": CollectionAssignment(collection=UNCATEGORIZED)},
+        embedder=embedder,
+    )
+    pending = vault.save_reel(URL)
+    assert isinstance(pending, NeedsCollectionChoice)
+
+    result = vault.assign_collection(
+        pending, collection="Random Musings", subcollection="Half Thoughts"
+    )
+
+    assert isinstance(result, Saved)
+    assert result.reel.embedding == embedder.embed(
+        embedding_text(
+            "totally unclassifiable", ["misc"], "Random Musings", "Half Thoughts"
+        )
+    )
+    assert result.reel.embedding != embedder.embed("totally unclassifiable")
 
 
 def test_assign_collection_accepts_a_subcollection() -> None:
