@@ -207,9 +207,17 @@ def _format_empty_list_reply(*, author: str | None = None, collection: str | Non
 
 
 def _format_saved_reply(reel: SavedReel, *, already_saved: bool) -> str:
-    return _describe_reel(
-        reel, lead="Already saved that one." if already_saved else "Saved!"
-    )
+    """The status line, then the reel's link, then its details.
+
+    The link is not decoration here. Re-filing a reel works by replying to its
+    card, and the bot recognizes which reel that is by reading the link back
+    out of the card being replied to — so a confirmation that omitted it was
+    the one card in the bot you could not correct by reply, on the very screen
+    where a misfiling is most likely to be noticed.
+    """
+    status = "Already saved that one." if already_saved else "Saved!"
+    link = f'<a href="{_esc(reel.url)}">{_esc(reel.url)}</a>'
+    return _describe_reel(reel, lead=f"{status}\n{link}")
 
 
 class ReelVaultBot:

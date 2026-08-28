@@ -529,3 +529,21 @@ async def test_opening_the_picker_does_not_move_anything(bot: ReelVaultBot) -> N
     unmoved = bot._vault._store.find_by_url("https://instagram.com/p/ABC")
     assert unmoved is not None
     assert unmoved.collection != "Entrepreneurship"
+
+
+async def test_replying_to_the_save_confirmation_moves_the_reel(
+    bot: ReelVaultBot,
+) -> None:
+    """The confirmation is where a misfiling is most likely to be noticed, so
+    replying to it has to work the same as replying to any other card — which
+    means it has to print the reel's link like every other card does."""
+    message = _make_message("https://instagram.com/reel/ABC")
+    await bot._on_message(_make_update(message), MagicMock())
+    confirmation = message.reply_text.await_args.args[0]
+
+    reply = _make_reply_to_card("Entrepreneurship / Small Business", confirmation)
+    await bot._on_message(_make_update(reply), MagicMock())
+
+    moved = bot._vault._store.find_by_url("https://instagram.com/p/ABC")
+    assert moved is not None
+    assert moved.collection == "Entrepreneurship"
