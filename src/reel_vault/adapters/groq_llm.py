@@ -85,6 +85,14 @@ not write "shares 4 bicep hacks".
 Rules:
 - Report only what the captions actually say. Never invent, and never guess at \
 what the video shows - a caption is all you can see of its reel.
+- Do not credit a caption with answering the question just because it shares a \
+topic word with it. A caption mentioning "habits" is not thereby advice on \
+"growing a personal brand" - it has to actually say so. Example: asked "how \
+do I grow my personal brand", a caption reading "comment HABITS for my list \
+of habits" does NOT support writing "a list of habits that can help grow \
+your personal brand" - nothing in that caption makes that claim. The correct \
+answer there is that none of the captions give direct advice on the question \
+asked.
 - Open with one or two sentences answering the question directly, before any \
 heading or bullet.
 - Group by theme by default. Group by creator only when the user asked who \
