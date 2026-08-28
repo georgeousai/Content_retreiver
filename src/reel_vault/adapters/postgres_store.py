@@ -110,6 +110,19 @@ class PostgresReelStore:
         # DO NOTHING leaves rowcount at 0 when the URL was already there.
         return cursor.rowcount > 0
 
+    def update(self, reel: SavedReel) -> None:
+        self._conn.execute(
+            "UPDATE saved_reels SET collection = %s, subcollection = %s, "
+            "embedding = %s, metadata_text = %s WHERE normalized_url = %s",
+            (
+                reel.collection,
+                reel.subcollection,
+                Vector(reel.embedding),
+                metadata_text(reel.tags, reel.collection, reel.subcollection),
+                reel.url,
+            ),
+        )
+
     def known_collections(self) -> dict[str, list[str]]:
         rows = self._conn.execute(
             "SELECT collection, subcollection FROM saved_reels "

@@ -9,6 +9,7 @@ Telegram, Groq, Postgres, or any other concrete integration.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 
 from reel_vault.models import (
     UNCATEGORIZED,
@@ -189,6 +190,43 @@ class Vault:
             author_name=pending.author_name,
         )
         return self._persist(reel, thumbnail_url=pending.thumbnail_url)
+
+    def collections(self) -> list[str]:
+        """Every collection the vault holds, for offering the user a choice."""
+        return sorted(self._store.known_collections())
+
+    def refile(
+        self, url: str, *, collection: str, subcollection: str | None = None
+    ) -> SavedReel | None:
+        """Move an already-saved reel to a different shelf, or None if the
+        vault doesn't have it.
+
+        Where a reel belongs is often genuinely ambiguous — a five-year
+        journey building a small business is both Personal Growth and
+        Entrepreneurship — so this exists because no classifier, however
+        well prompted, can be right for a user who disagrees with it.
+
+        The reel is re-embedded rather than relabelled: since a reel is
+        embedded together with its collection, a move that only rewrote the
+        taxonomy would leave it still findable under the shelf it just left.
+        """
+        normalized = normalize_reel_url(url)
+        existing = self._store.find_by_url(normalized)
+        if existing is None:
+            return None
+
+        moved = replace(
+            existing,
+            collection=collection,
+            subcollection=subcollection,
+            embedding=self._embedder.embed(
+                embedding_text(
+                    existing.caption, existing.tags, collection, subcollection
+                )
+            ),
+        )
+        self._store.update(moved)
+        return moved
 
     def attach_thumbnail(self, url: str, thumbnail_ref: str) -> None:
         """Record a durable reference to a saved reel's picture. Only the

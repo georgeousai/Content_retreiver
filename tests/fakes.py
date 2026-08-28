@@ -121,6 +121,10 @@ class InMemoryReelStore:
         self._by_url[key] = reel
         return True
 
+    def update(self, reel: SavedReel) -> None:
+        if reel.url in self._by_url:
+            self._by_url[reel.url] = reel
+
     def known_collections(self) -> dict[str, list[str]]:
         known: dict[str, list[str]] = {}
         for reel in self._by_url.values():

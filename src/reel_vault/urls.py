@@ -38,6 +38,22 @@ INSTAGRAM_POST_URL = re.compile(
 INSTAGRAM_URL = re.compile(r"https?://(?:www\.)?instagram\.com/\S*", re.IGNORECASE)
 
 
+def shortcode_of(url: str) -> str | None:
+    """Instagram's own identifier for a post, or None if this isn't one."""
+    match = INSTAGRAM_POST_URL.search(url.strip())
+    return match["shortcode"] if match else None
+
+
+def url_for_shortcode(shortcode: str) -> str:
+    """The canonical URL carrying a shortcode — the inverse of `shortcode_of`.
+
+    Used where a reel's identity has to travel somewhere too small for a URL:
+    a Telegram callback allows 64 bytes for everything it carries, and the
+    shortcode is the only part of the URL that means anything anyway.
+    """
+    return f"https://instagram.com/p/{shortcode}"
+
+
 def find_reel_url(text: str) -> str | None:
     """The first recognizable Instagram post/reel link in `text`, or None."""
     match = INSTAGRAM_POST_URL.search(text)
@@ -59,9 +75,9 @@ def normalize_reel_url(url: str) -> str:
     old scheme/host/trailing-slash collapse, so a caller does not have to
     pre-validate before normalizing.
     """
-    match = INSTAGRAM_POST_URL.search(url.strip())
-    if match:
-        return f"https://instagram.com/p/{match['shortcode']}"
+    code = shortcode_of(url)
+    if code:
+        return url_for_shortcode(code)
 
     parts = urlsplit(url.strip())
     host = (parts.netloc or "").lower().removeprefix("www.")

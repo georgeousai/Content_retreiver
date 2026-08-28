@@ -11,12 +11,19 @@ import pytest
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 
-from reel_vault.bot import ReelVaultBot, _render_summary
+from reel_vault.bot import (
+    ReelVaultBot,
+    _collection_picker,
+    _move_keyboard,
+    _render_summary,
+)
+from reel_vault.urls import shortcode_of
 from reel_vault.models import (
     UNCATEGORIZED,
     CollectionAssignment,
     ExtractedPost,
     Saved,
+    SavedReel,
 )
 from tests.conftest import make_vault
 
@@ -28,6 +35,20 @@ def _make_message(text: str, chat_id: int = 1) -> MagicMock:
     message.reply_text = AsyncMock()
     message.reply_photo = AsyncMock()
     message.reply_media_group = AsyncMock()
+    # Real Telegram leaves this unset unless the message really is a reply; a
+    # bare MagicMock would instead look like a reply to a mock message.
+    message.reply_to_message = None
+    return message
+
+
+def _make_reply_to_card(text: str, card_text: str, chat_id: int = 1) -> MagicMock:
+    """A message replying to a card the bot posted earlier. The bot reads the
+    reel out of the card's own text, so that is what has to be there."""
+    message = _make_message(text, chat_id=chat_id)
+    card = MagicMock()
+    card.text = card_text
+    card.caption = None
+    message.reply_to_message = card
     return message
 
 
@@ -362,3 +383,149 @@ def test_markup_in_a_summary_is_inert_rather_than_rendered() -> None:
     rendered = _render_summary("He said <b>never</b> & meant it")
 
     assert rendered == "He said &lt;b&gt;never&lt;/b&gt; &amp; meant it"
+
+
+# --- re-filing a reel the classifier put in the wrong place ----------------
+
+
+async def test_replying_to_a_card_moves_that_reel(bot: ReelVaultBot) -> None:
+    """Live case: a "Five Year Journey #smallbusiness" reel was filed under
+    Personal Growth because a "Journey" sub-collection already existed there,
+    when it belonged under Entrepreneurship. The reel is identified from the
+    card being replied to, so nothing has to be re-pasted."""
+    assert isinstance(bot._vault.save_reel("https://instagram.com/reel/ABC"), Saved)
+    card = "https://instagram.com/p/ABC\nPersonal Growth > Journey"
+
+    message = _make_reply_to_card("Entrepreneurship / Small Business", card)
+    await bot._on_message(_make_update(message), MagicMock())
+
+    moved = bot._vault._store.find_by_url("https://instagram.com/p/ABC")
+    assert moved is not None
+    assert moved.collection == "Entrepreneurship"
+    assert moved.subcollection == "Small Business"
+
+
+async def test_a_moved_reel_is_re_embedded_for_its_new_shelf(
+    bot: ReelVaultBot,
+) -> None:
+    """A reel is embedded together with its collection, so a move that only
+    rewrote the label would leave it findable under the shelf it just left."""
+    assert isinstance(bot._vault.save_reel("https://instagram.com/reel/ABC"), Saved)
+    before = bot._vault._store.find_by_url("https://instagram.com/p/ABC")
+    assert before is not None
+
+    message = _make_reply_to_card(
+        "Entrepreneurship", "https://instagram.com/p/ABC"
+    )
+    await bot._on_message(_make_update(message), MagicMock())
+
+    after = bot._vault._store.find_by_url("https://instagram.com/p/ABC")
+    assert after is not None
+    assert after.embedding != before.embedding
+    assert after.caption == before.caption
+    assert after.tags == before.tags
+
+
+async def test_a_move_keeps_the_reels_picture_and_when_it_was_saved(
+    bot: ReelVaultBot,
+) -> None:
+    """Re-filing is not a re-save: everything that isn't the taxonomy or what
+    depends on it survives."""
+    url = "https://instagram.com/reel/PIC"
+    bot._vault = make_vault(captions={url: "ai agents explained"})
+    _save_with_picture(bot._vault, url, "ai agents explained", "tg-file-id")
+    before = bot._vault._store.find_by_url("https://instagram.com/p/PIC")
+    assert before is not None
+
+    message = _make_reply_to_card("Entrepreneurship", "https://instagram.com/p/PIC")
+    await bot._on_message(_make_update(message), MagicMock())
+
+    after = bot._vault._store.find_by_url("https://instagram.com/p/PIC")
+    assert after is not None
+    assert after.thumbnail_ref == "tg-file-id"
+    assert after.saved_at == before.saved_at
+
+
+async def test_replying_about_a_reel_the_vault_does_not_have_says_so(
+    bot: ReelVaultBot,
+) -> None:
+    message = _make_reply_to_card("Entrepreneurship", "https://instagram.com/p/NOPE")
+    await bot._on_message(_make_update(message), MagicMock())
+
+    reply = message.reply_text.await_args.args[0]
+    assert "don't have" in reply.lower()
+
+
+async def test_a_reply_that_is_not_to_a_card_is_still_a_query(
+    bot: ReelVaultBot,
+) -> None:
+    """Replying to something with no reel in it must not be read as a move."""
+    assert isinstance(bot._vault.save_reel("https://instagram.com/reel/ABC"), Saved)
+
+    message = _make_reply_to_card("find that reel about ai", "just some chatter")
+    await bot._on_message(_make_update(message), MagicMock())
+
+    assert "instagram.com/p/ABC" in message.reply_text.await_args.args[0]
+
+
+def test_every_card_carries_a_move_button() -> None:
+    reel = SavedReel(url="https://instagram.com/p/ABC", caption="c", tags=[], embedding=[])
+
+    markup = _move_keyboard(shortcode_of(reel.url) or "")
+
+    assert markup.inline_keyboard[0][0].callback_data == "mv:ABC"
+
+
+def test_the_picker_offers_the_vaults_own_collections() -> None:
+    markup = _collection_picker("ABC", ["AI", "Entrepreneurship"])
+
+    offered = [b.text for row in markup.inline_keyboard for b in row]
+    assert offered == ["AI", "Entrepreneurship", "Cancel"]
+
+
+def test_a_collection_too_long_for_a_callback_is_left_out_not_truncated() -> None:
+    """A truncated callback would file the reel under a name the user never
+    chose. Replying to the card still reaches it by name."""
+    too_long = "A" * 60
+
+    markup = _collection_picker("ABC", ["AI", too_long])
+
+    offered = [b.text for row in markup.inline_keyboard for b in row]
+    assert offered == ["AI", "Cancel"]
+
+
+async def test_tapping_a_collection_moves_the_reel(bot: ReelVaultBot) -> None:
+    assert isinstance(bot._vault.save_reel("https://instagram.com/reel/ABC"), Saved)
+
+    query = MagicMock()
+    query.data = "mvto:ABC:Entrepreneurship"
+    query.answer = AsyncMock()
+    query.edit_message_caption = AsyncMock()
+    query.edit_message_text = AsyncMock()
+    query.message = MagicMock(spec=[])
+    update = MagicMock()
+    update.callback_query = query
+
+    await bot._on_callback(update, MagicMock())
+
+    moved = bot._vault._store.find_by_url("https://instagram.com/p/ABC")
+    assert moved is not None
+    assert moved.collection == "Entrepreneurship"
+
+
+async def test_opening_the_picker_does_not_move_anything(bot: ReelVaultBot) -> None:
+    assert isinstance(bot._vault.save_reel("https://instagram.com/reel/ABC"), Saved)
+
+    query = MagicMock()
+    query.data = "mv:ABC"
+    query.answer = AsyncMock()
+    query.edit_message_reply_markup = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+
+    await bot._on_callback(update, MagicMock())
+
+    query.edit_message_reply_markup.assert_awaited_once()
+    unmoved = bot._vault._store.find_by_url("https://instagram.com/p/ABC")
+    assert unmoved is not None
+    assert unmoved.collection != "Entrepreneurship"

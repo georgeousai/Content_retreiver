@@ -53,6 +53,15 @@ class ReelStore(Protocol):
         already had"."""
         ...
 
+    def update(self, reel: SavedReel) -> None:
+        """Overwrite an already-saved reel, keyed on its URL.
+
+        Re-filing is not a taxonomy-only edit: a reel is embedded and indexed
+        together with the collection it sits on, so moving it between shelves
+        has to rewrite what it is findable by, not just what it is labelled.
+        """
+        ...
+
     def known_collections(self) -> dict[str, list[str]]:
         """Every collection currently in the vault, mapped to its
         sub-collections. Feeds the `CollectionAssigner`."""

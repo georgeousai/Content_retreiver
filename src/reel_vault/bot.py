@@ -6,10 +6,22 @@ from __future__ import annotations
 import html
 import logging
 
-from telegram import Message, Update
+from telegram import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    Update,
+)
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
-from telegram.ext import Application, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 from reel_vault.models import (
     UNCATEGORIZED,
@@ -24,12 +36,25 @@ from reel_vault.models import (
     SaveResult,
     SingleItemAnswer,
 )
-from reel_vault.urls import INSTAGRAM_URL, find_reel_url
+from reel_vault.urls import (
+    INSTAGRAM_URL,
+    find_reel_url,
+    shortcode_of,
+    url_for_shortcode,
+)
 from reel_vault.vault import Vault
 
 logger = logging.getLogger(__name__)
 
 NO_MATCH_REPLY = "Nothing in the vault matches that."
+
+# Callback actions. A reel travels through these as its shortcode rather
+# than its URL: Telegram allows 64 bytes for everything a callback carries,
+# and the shortcode is the only part of the URL that identifies anything.
+MOVE_OPEN = "mv"
+MOVE_TO = "mvto"
+MOVE_CANCEL = "mvx"
+CALLBACK_LIMIT = 64
 
 
 def _esc(text: str) -> str:
@@ -60,6 +85,50 @@ def _render_summary(text: str) -> str:
         else:
             rendered.append(line)
     return "\n".join(rendered)
+
+
+def _move_keyboard(shortcode: str) -> InlineKeyboardMarkup:
+    """The button every card carries. Where a reel belongs is often a
+    judgement call the classifier can lose honestly, so the way to disagree
+    with it belongs on the reel itself rather than in documentation."""
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Move", callback_data=f"{MOVE_OPEN}:{shortcode}")]]
+    )
+
+
+def _collection_picker(shortcode: str, collections: list[str]) -> InlineKeyboardMarkup:
+    """The vault's existing shelves, two to a row.
+
+    A collection whose name would push the callback past Telegram's 64-byte
+    limit is left out rather than truncated into a button that would file the
+    reel somewhere it never said; replying to the card still reaches it by
+    name.
+    """
+    buttons = [
+        InlineKeyboardButton(name, callback_data=data)
+        for name in collections
+        for data in [f"{MOVE_TO}:{shortcode}:{name}"]
+        if len(data.encode()) <= CALLBACK_LIMIT
+    ]
+    rows = [buttons[at : at + 2] for at in range(0, len(buttons), 2)]
+    rows.append(
+        [InlineKeyboardButton("Cancel", callback_data=f"{MOVE_CANCEL}:{shortcode}")]
+    )
+    return InlineKeyboardMarkup(rows)
+
+
+def _replied_to_reel_url(message: Message) -> str | None:
+    """The reel a message is replying to, read back out of the card itself.
+
+    Every card prints its reel's link, so the card is already the record of
+    which reel it showed. Keeping a message-id-to-reel map instead would be
+    state that dies on restart, and a user replying to yesterday's card has
+    no way to know the bot has forgotten what it was.
+    """
+    replied = message.reply_to_message
+    if replied is None:
+        return None
+    return find_reel_url(replied.text or replied.caption or "")
 
 
 def _format_location(reel: SavedReel) -> str:
@@ -149,7 +218,10 @@ class ReelVaultBot:
         self._pending_manual_caption: dict[int, str] = {}
         self._pending_collection_choice: dict[int, NeedsCollectionChoice] = {}
         self._app = Application.builder().token(token).build()
-        self._app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_message))
+        self._app.add_handler(
+            MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_message)
+        )
+        self._app.add_handler(CallbackQueryHandler(self._on_callback))
 
     def run(self) -> None:
         self._app.run_polling()
@@ -165,6 +237,11 @@ class ReelVaultBot:
 
         if reel_url:
             await self._handle_url(message, reel_url)
+            return
+
+        replied_to = _replied_to_reel_url(message)
+        if replied_to is not None:
+            await self._handle_refile(message, replied_to, text)
             return
 
         pending_url = self._pending_manual_caption.pop(chat_id, None)
@@ -242,22 +319,111 @@ class ReelVaultBot:
         configure.
         """
         text = _format_saved_reply(result.reel, already_saved=False)
+        # The confirmation is where a misfiling is most likely to be spotted,
+        # so it carries the same Move button every other card does.
+        markup = _move_keyboard(shortcode_of(result.reel.url) or "")
         if not result.thumbnail_url:
-            await message.reply_text(text, parse_mode=ParseMode.HTML)
+            await message.reply_text(
+                text, parse_mode=ParseMode.HTML, reply_markup=markup
+            )
             return
 
         try:
             sent = await message.reply_photo(
-                photo=result.thumbnail_url, caption=text, parse_mode=ParseMode.HTML
+                photo=result.thumbnail_url,
+                caption=text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=markup,
             )
         except TelegramError as exc:
             # A picture is a nicety; the reel is already saved either way.
             logger.info("Could not send thumbnail for %s: %s", result.reel.url, exc)
-            await message.reply_text(text, parse_mode=ParseMode.HTML)
+            await message.reply_text(
+                text, parse_mode=ParseMode.HTML, reply_markup=markup
+            )
             return
 
         if sent.photo:
             self._vault.attach_thumbnail(result.reel.url, sent.photo[-1].file_id)
+
+    async def _handle_refile(self, message: Message, url: str, reply: str) -> None:
+        collection, subcollection = _parse_collection_reply(reply)
+        if not collection:
+            await message.reply_text(
+                "Reply with where it should go, like "
+                "<code>Entrepreneurship / Small Business</code>.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        reel = self._vault.refile(
+            url, collection=collection, subcollection=subcollection
+        )
+        if reel is None:
+            await message.reply_text("I don't have that reel saved.")
+            return
+
+        await message.reply_text(
+            f"Moved to <b>{_format_location(reel)}</b>.", parse_mode=ParseMode.HTML
+        )
+
+    async def _on_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        query = update.callback_query
+        if query is None or not query.data:
+            return
+        action, _, rest = query.data.partition(":")
+        shortcode, _, collection = rest.partition(":")
+
+        if action == MOVE_OPEN:
+            await query.answer()
+            await self._swap_keyboard(
+                query, _collection_picker(shortcode, self._vault.collections())
+            )
+        elif action == MOVE_CANCEL:
+            await query.answer()
+            await self._swap_keyboard(query, _move_keyboard(shortcode))
+        elif action == MOVE_TO:
+            # A button carries a collection only. The sub-collection a reel
+            # had belonged to the shelf it is leaving, so it is not carried
+            # across; replying to the card sets both.
+            reel = self._vault.refile(
+                url_for_shortcode(shortcode), collection=collection
+            )
+            if reel is None:
+                await query.answer("I don't have that reel saved.", show_alert=True)
+                return
+            await query.answer(f"Moved to {collection}")
+            await self._redraw_card(query, reel)
+
+    async def _swap_keyboard(
+        self, query: CallbackQuery, markup: InlineKeyboardMarkup
+    ) -> None:
+        try:
+            await query.edit_message_reply_markup(reply_markup=markup)
+        except TelegramError as exc:
+            logger.info("Could not update card buttons: %s", exc)
+
+    async def _redraw_card(self, query: CallbackQuery, reel: SavedReel) -> None:
+        """Rewrite the card in place, so it stops naming the shelf the reel
+        has just left."""
+        body = _format_reel_detail(reel)
+        markup = _move_keyboard(shortcode_of(reel.url) or "")
+        # A callback's message can come back as an InaccessibleMessage (too
+        # old for Telegram to hand over), which carries no content to inspect.
+        card = query.message
+        try:
+            if isinstance(card, Message) and card.photo:
+                await query.edit_message_caption(
+                    caption=body, parse_mode=ParseMode.HTML, reply_markup=markup
+                )
+            else:
+                await query.edit_message_text(
+                    text=body, parse_mode=ParseMode.HTML, reply_markup=markup
+                )
+        except TelegramError as exc:
+            logger.info("Could not redraw card for %s: %s", reel.url, exc)
 
     async def _handle_query(self, message: Message, query: str) -> None:
         answer = self._vault.ask(query)
@@ -293,12 +459,18 @@ class ReelVaultBot:
     ) -> None:
         """One reel, as a picture the user can recognize where we have one."""
         body = text if text is not None else _format_reel_detail(reel)
+        markup = _move_keyboard(shortcode_of(reel.url) or "")
         if reel.thumbnail_ref:
             await message.reply_photo(
-                photo=reel.thumbnail_ref, caption=body, parse_mode=ParseMode.HTML
+                photo=reel.thumbnail_ref,
+                caption=body,
+                parse_mode=ParseMode.HTML,
+                reply_markup=markup,
             )
         else:
-            await message.reply_text(body, parse_mode=ParseMode.HTML)
+            await message.reply_text(
+                body, parse_mode=ParseMode.HTML, reply_markup=markup
+            )
 
     async def _send_reel_cards(self, message: Message, reels: list[SavedReel]) -> None:
         """One message per reel — the picture sits directly under its own
