@@ -10,6 +10,68 @@ broke or were missing, discovered after the fact.
 
 ---
 
+## The classifier repeated mistakes, and moves could not be taken back
+
+**Symptom:** Two gaps left open after the Move feature. Correcting the same
+misfiling twenty times taught the classifier nothing — it would make it a
+twenty-first. And a wrong move had no undo; you had to remember the old shelf
+and move it back by hand.
+
+**Cause (learning):** The assigner was given the caption and a list of
+collection *names*. Names say what shelves exist and nothing about what goes
+on them, so the only signal available was word-matching against shelf labels
+— which is precisely how `Five Year Journey #smallbusiness` matched a
+`Journey` sub-collection belonging to an unrelated collection.
+
+**Fix:** The assigner is now shown the already-filed reels whose captions most
+resemble the one being placed, with where each ended up — evidence about how
+this library is actually organized. A placement the *user* made is flagged
+`[user-placed]` and the model is told to prefer it on conflict.
+
+**Why the flag matters more than it looks:** without it the mechanism decays.
+A mistake the classifier made becomes a neighbour, the neighbour becomes
+precedent, and the error propagates to every similar reel. A person's decision
+is evidence about what they want; the classifier's own earlier guess is not
+evidence of anything.
+
+**Two design consequences:**
+- **A second embedding per reel.** The retrieval embedding covers collection
+  and tags too, so reusing it for neighbour lookup would let a shelf attract
+  reels for sharing its vocabulary — reintroducing the exact reuse bias this
+  counters, in the place it does most damage. Caption-only embeddings are
+  compared caption-to-caption.
+- **A similarity floor (0.25).** Live, a novel caption (`"How I closed my
+  first enterprise deal"`) drew its five nearest neighbours at 0.15–0.18 —
+  unrelated reels formatted identically to real precedent. Noise in the shape
+  of evidence is worse than an empty list.
+
+**Verified live** — re-sharing the previously misfiled reel now shows:
+
+```
+- filed under Entrepreneurship > Small Business [user-placed] (0.92): "Five Year Journey…"
+- filed under Personal Growth > Journey (0.53): "6 months to become unrecognisable…"
+```
+
+The correction outranks the mistake, and is flagged as the user's.
+
+**Fix (undo):** Each move is recorded in a `reel_corrections` table; the card
+shows `Undo` afterwards. The previous shelf is looked up rather than carried
+in the callback — a collection/sub-collection pair overruns Telegram's
+64-byte budget on exactly the long names most likely to be misfiled.
+
+Undo **removes** the record rather than reversing it, and restores
+`user_placed`. An undone mistake that left that flag set would go on teaching
+the classifier something the user had explicitly retracted.
+
+**Migration:** `caption_embedding` backfilled for all 22 rows; without it the
+neighbour lookup ignores a reel entirely.
+
+**Still open:** editable tags, and bulk/collection-level moves.
+
+**Commit:** `3a54565` — Place a reel by where comparable reels actually went
+
+---
+
 ## A reel was filed on the wrong shelf, with no way to say so
 
 **Symptom:** `"Five Year Journey #fyp📈 #smallbusiness"` filed under
