@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from datetime import timezone
 
@@ -10,6 +11,12 @@ from pgvector import Vector
 from pgvector.psycopg import register_vector
 
 from reel_vault.models import UNCATEGORIZED, SavedReel
+
+logger = logging.getLogger(__name__)
+
+# Long enough for a container still waking up, short enough that a database
+# that isn't there gets said out loud rather than waited on forever.
+DEFAULT_CONNECT_TIMEOUT = 10
 
 SCHEMA = f"""
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -42,10 +49,25 @@ COLUMNS = (
 
 
 class PostgresReelStore:
-    def __init__(self, dsn: str) -> None:
-        self._conn = psycopg.connect(dsn, autocommit=True)
+    def __init__(self, dsn: str, *, connect_timeout: int = DEFAULT_CONNECT_TIMEOUT) -> None:
+        # Say where we are going before we try. An unreachable Postgres — the
+        # container simply not started — TIMES OUT rather than refusing, so
+        # without this the process hangs silently before the bot ever polls,
+        # looking like a bot that starts fine and ignores every message.
+        logger.info("Connecting to Postgres at %s", _describe(dsn))
+        try:
+            self._conn = psycopg.connect(
+                dsn, autocommit=True, connect_timeout=connect_timeout
+            )
+        except psycopg.OperationalError as exc:
+            raise RuntimeError(
+                f"Could not reach Postgres at {_describe(dsn)} within "
+                f"{connect_timeout}s. Is the database container running? "
+                f"(psycopg: {exc})"
+            ) from exc
         register_vector(self._conn)
         self._conn.execute(SCHEMA)
+        logger.info("Connected to Postgres; vault ready.")
 
     def find_by_url(self, normalized_url: str) -> SavedReel | None:
         row = self._conn.execute(
@@ -125,6 +147,11 @@ class PostgresReelStore:
             (vector, vector, top_k),
         ).fetchall()
         return [(_to_reel(row[:-1]), row[-1]) for row in rows]
+
+
+def _describe(dsn: str) -> str:
+    """The host/port half of a DSN — never the credentials in front of it."""
+    return dsn.rsplit("@", 1)[-1] if "@" in dsn else dsn
 
 
 def _to_reel(row: tuple) -> SavedReel:
