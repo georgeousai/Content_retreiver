@@ -11,7 +11,9 @@ from dataclasses import replace
 
 from reel_vault.models import (
     CollectionAssignment,
+    Correction,
     ExtractedPost,
+    NeighbourPlacement,
     QueryClassification,
     QueryKind,
     SavedReel,
@@ -70,9 +72,16 @@ class FakeCollectionAssigner:
         self._assignments = assignments or {}
         self._default_collection = default_collection
         self.seen_known: list[dict[str, list[str]]] = []
+        self.seen_neighbours: list[list[NeighbourPlacement]] = []
 
-    def assign(self, caption: str, known: dict[str, list[str]]) -> CollectionAssignment:
+    def assign(
+        self,
+        caption: str,
+        known: dict[str, list[str]],
+        neighbours: list[NeighbourPlacement],
+    ) -> CollectionAssignment:
         self.seen_known.append(known)
+        self.seen_neighbours.append(neighbours)
         if caption in self._assignments:
             return self._assignments[caption]
 
@@ -109,6 +118,7 @@ class FakeEmbedder:
 class InMemoryReelStore:
     def __init__(self) -> None:
         self._by_url: dict[str, SavedReel] = {}
+        self._corrections: dict[str, list[Correction]] = {}
         self.search_calls: list[int] = []
 
     def find_by_url(self, normalized_url: str) -> SavedReel | None:
@@ -124,6 +134,35 @@ class InMemoryReelStore:
     def update(self, reel: SavedReel) -> None:
         if reel.url in self._by_url:
             self._by_url[reel.url] = reel
+
+    def find_similar_captions(
+        self, caption_embedding: list[float], limit: int
+    ) -> list[NeighbourPlacement]:
+        scored = [
+            (reel, _cosine(caption_embedding, reel.caption_embedding))
+            for reel in self._by_url.values()
+            if reel.caption_embedding
+        ]
+        scored.sort(key=lambda pair: pair[1], reverse=True)
+        return [
+            NeighbourPlacement(
+                caption=reel.caption,
+                collection=reel.collection,
+                subcollection=reel.subcollection,
+                similarity=similarity,
+                user_placed=reel.user_placed,
+            )
+            for reel, similarity in scored[:limit]
+        ]
+
+    def record_correction(self, correction: Correction) -> None:
+        self._corrections.setdefault(correction.url, []).append(correction)
+
+    def pop_last_correction(self, normalized_url: str) -> Correction | None:
+        history = self._corrections.get(normalized_url)
+        if not history:
+            return None
+        return history.pop()
 
     def known_collections(self) -> dict[str, list[str]]:
         known: dict[str, list[str]] = {}

@@ -9,7 +9,9 @@ from typing import Protocol
 
 from reel_vault.models import (
     CollectionAssignment,
+    Correction,
     ExtractedPost,
+    NeighbourPlacement,
     QueryClassification,
     SavedReel,
     SummarySource,
@@ -30,11 +32,21 @@ class Tagger(Protocol):
 
 class CollectionAssigner(Protocol):
     def assign(
-        self, caption: str, known: dict[str, list[str]]
+        self,
+        caption: str,
+        known: dict[str, list[str]],
+        neighbours: list[NeighbourPlacement],
     ) -> CollectionAssignment:
-        """Place a caption in the taxonomy. `known` maps each existing
-        collection to its existing sub-collections, so implementations can
-        reuse what is already there instead of coining near-duplicates."""
+        """Place a caption in the taxonomy.
+
+        `known` maps each existing collection to its existing sub-collections,
+        so implementations can reuse what is already there instead of coining
+        near-duplicates. `neighbours` are the most similar captions already
+        filed, with where each went — the names alone say what shelves exist
+        but nothing about what actually goes on them, which is how a reel
+        captioned "Five Year Journey #smallbusiness" was filed under a
+        Journey sub-collection that had nothing to do with it.
+        """
         ...
 
 
@@ -51,6 +63,28 @@ class ReelStore(Protocol):
         """Persist a new reel. Returns False if one with this URL already
         existed, so a racing caller can tell "I saved it" from "someone
         already had"."""
+        ...
+
+    def find_similar_captions(
+        self, caption_embedding: list[float], limit: int
+    ) -> list[NeighbourPlacement]:
+        """The already-filed reels whose captions most resemble this one.
+
+        Compared caption-to-caption rather than against the retrieval
+        embedding, which also covers collection and tags and would therefore
+        favour whichever shelf happens to share the caption's vocabulary.
+        """
+        ...
+
+    def record_correction(self, correction: Correction) -> None:
+        """Remember that the user moved a reel, so the move can be undone."""
+        ...
+
+    def pop_last_correction(self, normalized_url: str) -> Correction | None:
+        """Take back the most recent move of this reel, removing it from the
+        record. Removed rather than kept-and-reversed: after an undo the reel
+        sits where it was originally put, and a lingering record would claim
+        a person chose that."""
         ...
 
     def update(self, reel: SavedReel) -> None:

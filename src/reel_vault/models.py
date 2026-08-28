@@ -36,6 +36,13 @@ class SavedReel:
     caption: str
     tags: list[str]
     embedding: list[float]
+    # The caption on its own, kept alongside the retrieval embedding above
+    # (which also covers the collection and tags). Asking "where did reels
+    # like this one go?" has to compare captions to captions: measuring a new
+    # caption against embeddings that already contain shelf names would let a
+    # collection pull in reels merely for sharing its vocabulary, which is
+    # the reuse bias this lookup exists to counter.
+    caption_embedding: list[float] = field(default_factory=list)
     collection: str = UNCATEGORIZED
     subcollection: str | None = None
     author_handle: str | None = None
@@ -43,6 +50,10 @@ class SavedReel:
     # A reference we control and that does not expire — not the extracted
     # CDN URL, which is signed and eventually 404s.
     thumbnail_ref: str | None = None
+    # Whether a person put this reel here, rather than the classifier. A
+    # human placement is better evidence of where a library wants things than
+    # a machine one, and is weighted accordingly when placing later reels.
+    user_placed: bool = False
     saved_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -87,6 +98,9 @@ class NeedsCollectionChoice:
     url: str
     caption: str
     tags: list[str]
+    # Carried, unlike the retrieval embedding, because it depends only on the
+    # caption — the answer the user is about to give cannot change it.
+    caption_embedding: list[float]
     author_handle: str | None
     author_name: str | None
     known_collections: dict[str, list[str]]
@@ -94,6 +108,39 @@ class NeedsCollectionChoice:
 
 
 SaveResult = Saved | AlreadySaved | ExtractionFailed | NeedsCollectionChoice
+
+
+@dataclass(frozen=True)
+class Correction:
+    """One move of a reel from one shelf to another, as the user made it.
+
+    Kept so a move can be undone. `from_user_placed` is part of the record
+    because undoing has to restore not just where the reel sat but whether a
+    person had put it there — otherwise reversing a move would leave behind a
+    placement claiming human authority nobody exercised.
+    """
+
+    url: str
+    from_collection: str
+    from_subcollection: str | None
+    to_collection: str
+    to_subcollection: str | None
+    from_user_placed: bool = False
+    corrected_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+@dataclass(frozen=True)
+class NeighbourPlacement:
+    """An already-filed reel whose caption resembles one being filed now, and
+    where it ended up. Shown to the `CollectionAssigner` as evidence of how
+    this particular library is organized, which the collection names alone
+    cannot convey."""
+
+    caption: str
+    collection: str
+    subcollection: str | None
+    similarity: float
+    user_placed: bool = False
 
 
 @dataclass(frozen=True)

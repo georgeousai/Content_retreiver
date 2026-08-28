@@ -54,6 +54,7 @@ NO_MATCH_REPLY = "Nothing in the vault matches that."
 MOVE_OPEN = "mv"
 MOVE_TO = "mvto"
 MOVE_CANCEL = "mvx"
+MOVE_UNDO = "mvu"
 CALLBACK_LIMIT = 64
 
 
@@ -93,6 +94,21 @@ def _move_keyboard(shortcode: str) -> InlineKeyboardMarkup:
     with it belongs on the reel itself rather than in documentation."""
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton("Move", callback_data=f"{MOVE_OPEN}:{shortcode}")]]
+    )
+
+
+def _undo_keyboard(shortcode: str) -> InlineKeyboardMarkup:
+    """Offered only just after a move, on the card that move rewrote. The
+    previous shelf is not carried in the callback — a collection and
+    sub-collection pair overruns Telegram's 64-byte budget on exactly the
+    long names most likely to be mis-filed — so the vault looks it up."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Undo", callback_data=f"{MOVE_UNDO}:{shortcode}"),
+                InlineKeyboardButton("Move", callback_data=f"{MOVE_OPEN}:{shortcode}"),
+            ]
+        ]
     )
 
 
@@ -372,7 +388,9 @@ class ReelVaultBot:
             return
 
         await message.reply_text(
-            f"Moved to <b>{_format_location(reel)}</b>.", parse_mode=ParseMode.HTML
+            f"Moved to <b>{_format_location(reel)}</b>.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=_undo_keyboard(shortcode_of(reel.url) or ""),
         )
 
     async def _on_callback(
@@ -403,7 +421,14 @@ class ReelVaultBot:
                 await query.answer("I don't have that reel saved.", show_alert=True)
                 return
             await query.answer(f"Moved to {collection}")
-            await self._redraw_card(query, reel)
+            await self._redraw_card(query, reel, _undo_keyboard(shortcode))
+        elif action == MOVE_UNDO:
+            restored = self._vault.undo_last_move(url_for_shortcode(shortcode))
+            if restored is None:
+                await query.answer("Nothing to undo for that reel.", show_alert=True)
+                return
+            await query.answer(f"Back in {restored.collection}")
+            await self._redraw_card(query, restored)
 
     async def _swap_keyboard(
         self, query: CallbackQuery, markup: InlineKeyboardMarkup
@@ -413,11 +438,16 @@ class ReelVaultBot:
         except TelegramError as exc:
             logger.info("Could not update card buttons: %s", exc)
 
-    async def _redraw_card(self, query: CallbackQuery, reel: SavedReel) -> None:
+    async def _redraw_card(
+        self,
+        query: CallbackQuery,
+        reel: SavedReel,
+        markup: InlineKeyboardMarkup | None = None,
+    ) -> None:
         """Rewrite the card in place, so it stops naming the shelf the reel
         has just left."""
         body = _format_reel_detail(reel)
-        markup = _move_keyboard(shortcode_of(reel.url) or "")
+        markup = markup or _move_keyboard(shortcode_of(reel.url) or "")
         # A callback's message can come back as an InaccessibleMessage (too
         # old for Telegram to hand over), which carries no content to inspect.
         card = query.message

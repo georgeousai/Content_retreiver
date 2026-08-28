@@ -547,3 +547,48 @@ async def test_replying_to_the_save_confirmation_moves_the_reel(
     moved = bot._vault._store.find_by_url("https://instagram.com/p/ABC")
     assert moved is not None
     assert moved.collection == "Entrepreneurship"
+
+
+async def test_a_move_offers_an_undo(bot: ReelVaultBot) -> None:
+    assert isinstance(bot._vault.save_reel("https://instagram.com/reel/ABC"), Saved)
+
+    message = _make_reply_to_card("Entrepreneurship", "https://instagram.com/p/ABC")
+    await bot._on_message(_make_update(message), MagicMock())
+
+    markup = message.reply_text.await_args.kwargs["reply_markup"]
+    assert [b.text for b in markup.inline_keyboard[0]] == ["Undo", "Move"]
+
+
+async def test_tapping_undo_puts_the_reel_back(bot: ReelVaultBot) -> None:
+    assert isinstance(bot._vault.save_reel("https://instagram.com/reel/ABC"), Saved)
+    before = bot._vault._store.find_by_url("https://instagram.com/p/ABC")
+    assert before is not None
+    bot._vault.refile("https://instagram.com/p/ABC", collection="Entrepreneurship")
+
+    query = MagicMock()
+    query.data = "mvu:ABC"
+    query.answer = AsyncMock()
+    query.edit_message_text = AsyncMock()
+    query.message = MagicMock(spec=[])
+    update = MagicMock()
+    update.callback_query = query
+
+    await bot._on_callback(update, MagicMock())
+
+    back = bot._vault._store.find_by_url("https://instagram.com/p/ABC")
+    assert back is not None
+    assert back.collection == before.collection
+
+
+async def test_undo_on_a_reel_that_was_never_moved_says_so(bot: ReelVaultBot) -> None:
+    assert isinstance(bot._vault.save_reel("https://instagram.com/reel/ABC"), Saved)
+
+    query = MagicMock()
+    query.data = "mvu:ABC"
+    query.answer = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+
+    await bot._on_callback(update, MagicMock())
+
+    assert "nothing to undo" in query.answer.await_args.args[0].lower()

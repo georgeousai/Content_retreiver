@@ -10,7 +10,12 @@ import psycopg
 from pgvector import Vector
 from pgvector.psycopg import register_vector
 
-from reel_vault.models import UNCATEGORIZED, SavedReel
+from reel_vault.models import (
+    UNCATEGORIZED,
+    Correction,
+    NeighbourPlacement,
+    SavedReel,
+)
 from reel_vault.search import keyword_score, merge_hits, metadata_text
 
 logger = logging.getLogger(__name__)
@@ -43,7 +48,13 @@ ALTER TABLE saved_reels
     -- immutable, so a GENERATED column is rejected outright, and duplicating
     -- the definition in SQL would let it drift from the one the in-memory
     -- store uses.
-    ADD COLUMN IF NOT EXISTS metadata_text TEXT NOT NULL DEFAULT '';
+    ADD COLUMN IF NOT EXISTS metadata_text TEXT NOT NULL DEFAULT '',
+    -- The caption embedded on its own. The `embedding` column above also
+    -- covers collection and tags, so it cannot answer "which reels read
+    -- like this one?" without favouring whichever shelf shares the
+    -- caption's vocabulary.
+    ADD COLUMN IF NOT EXISTS caption_embedding VECTOR(384),
+    ADD COLUMN IF NOT EXISTS user_placed BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE INDEX IF NOT EXISTS saved_reels_collection_idx
     ON saved_reels (collection, subcollection);
@@ -52,11 +63,27 @@ CREATE INDEX IF NOT EXISTS saved_reels_author_idx ON saved_reels (author_handle)
 -- rather than for every row on every search.
 CREATE INDEX IF NOT EXISTS saved_reels_metadata_idx
     ON saved_reels USING GIN (to_tsvector('english', metadata_text));
+
+-- Every move the user has made, most recent first per reel, so one can be
+-- taken back.
+CREATE TABLE IF NOT EXISTS reel_corrections (
+    id BIGSERIAL PRIMARY KEY,
+    normalized_url TEXT NOT NULL,
+    from_collection TEXT NOT NULL,
+    from_subcollection TEXT,
+    to_collection TEXT NOT NULL,
+    to_subcollection TEXT,
+    from_user_placed BOOLEAN NOT NULL DEFAULT FALSE,
+    corrected_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS reel_corrections_url_idx
+    ON reel_corrections (normalized_url, corrected_at DESC);
 """
 
 COLUMNS = (
-    "normalized_url, caption, tags, embedding, collection, subcollection, "
-    "author_handle, author_name, thumbnail_ref, saved_at"
+    "normalized_url, caption, tags, embedding, caption_embedding, collection, "
+    "subcollection, author_handle, author_name, thumbnail_ref, user_placed, "
+    "saved_at"
 )
 
 
@@ -91,18 +118,20 @@ class PostgresReelStore:
     def save(self, reel: SavedReel) -> bool:
         cursor = self._conn.execute(
             f"INSERT INTO saved_reels ({COLUMNS}, metadata_text) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
             "ON CONFLICT (normalized_url) DO NOTHING",
             (
                 reel.url,
                 reel.caption,
                 reel.tags,
                 Vector(reel.embedding),
+                Vector(reel.caption_embedding) if reel.caption_embedding else None,
                 reel.collection,
                 reel.subcollection,
                 reel.author_handle,
                 reel.author_name,
                 reel.thumbnail_ref,
+                reel.user_placed,
                 reel.saved_at,
                 metadata_text(reel.tags, reel.collection, reel.subcollection),
             ),
@@ -113,14 +142,77 @@ class PostgresReelStore:
     def update(self, reel: SavedReel) -> None:
         self._conn.execute(
             "UPDATE saved_reels SET collection = %s, subcollection = %s, "
-            "embedding = %s, metadata_text = %s WHERE normalized_url = %s",
+            "embedding = %s, metadata_text = %s, user_placed = %s "
+            "WHERE normalized_url = %s",
             (
                 reel.collection,
                 reel.subcollection,
                 Vector(reel.embedding),
                 metadata_text(reel.tags, reel.collection, reel.subcollection),
+                reel.user_placed,
                 reel.url,
             ),
+        )
+
+    def find_similar_captions(
+        self, caption_embedding: list[float], limit: int
+    ) -> list[NeighbourPlacement]:
+        vector = Vector(caption_embedding)
+        rows = self._conn.execute(
+            "SELECT caption, collection, subcollection, user_placed, "
+            "1 - (caption_embedding <=> %s) AS similarity "
+            "FROM saved_reels WHERE caption_embedding IS NOT NULL "
+            "ORDER BY caption_embedding <=> %s LIMIT %s",
+            (vector, vector, limit),
+        ).fetchall()
+        return [
+            NeighbourPlacement(
+                caption=caption,
+                collection=collection,
+                subcollection=subcollection,
+                similarity=float(similarity),
+                user_placed=user_placed,
+            )
+            for caption, collection, subcollection, user_placed, similarity in rows
+        ]
+
+    def record_correction(self, correction: Correction) -> None:
+        self._conn.execute(
+            "INSERT INTO reel_corrections (normalized_url, from_collection, "
+            "from_subcollection, to_collection, to_subcollection, "
+            "from_user_placed, corrected_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (
+                correction.url,
+                correction.from_collection,
+                correction.from_subcollection,
+                correction.to_collection,
+                correction.to_subcollection,
+                correction.from_user_placed,
+                correction.corrected_at,
+            ),
+        )
+
+    def pop_last_correction(self, normalized_url: str) -> Correction | None:
+        row = self._conn.execute(
+            "DELETE FROM reel_corrections WHERE id = ("
+            "  SELECT id FROM reel_corrections WHERE normalized_url = %s"
+            "  ORDER BY corrected_at DESC, id DESC LIMIT 1"
+            ") RETURNING normalized_url, from_collection, from_subcollection, "
+            "to_collection, to_subcollection, from_user_placed, corrected_at",
+            (normalized_url,),
+        ).fetchone()
+        if row is None:
+            return None
+        url, from_c, from_s, to_c, to_s, from_user, at = row
+        return Correction(
+            url=url,
+            from_collection=from_c,
+            from_subcollection=from_s,
+            to_collection=to_c,
+            to_subcollection=to_s,
+            from_user_placed=from_user,
+            corrected_at=at,
         )
 
     def known_collections(self) -> dict[str, list[str]]:
@@ -227,11 +319,13 @@ def _to_reel(row: tuple) -> SavedReel:
         caption,
         tags,
         embedding,
+        caption_embedding,
         collection,
         subcollection,
         author_handle,
         author_name,
         thumbnail_ref,
+        user_placed,
         saved_at,
     ) = row
     saved_at = saved_at if saved_at.tzinfo else saved_at.replace(tzinfo=timezone.utc)
@@ -240,11 +334,15 @@ def _to_reel(row: tuple) -> SavedReel:
         caption=caption,
         tags=list(tags),
         embedding=_to_float_list(embedding),
+        caption_embedding=(
+            _to_float_list(caption_embedding) if caption_embedding is not None else []
+        ),
         collection=collection,
         subcollection=subcollection,
         author_handle=author_handle,
         author_name=author_name,
         thumbnail_ref=thumbnail_ref,
+        user_placed=user_placed,
         saved_at=saved_at,
     )
 

@@ -20,6 +20,7 @@ from groq import Groq
 from reel_vault.models import (
     UNCATEGORIZED,
     CollectionAssignment,
+    NeighbourPlacement,
     QueryClassification,
     QueryKind,
     SummarySource,
@@ -110,8 +111,9 @@ literally."""
 
 COLLECTION_SYSTEM_PROMPT = (
     "You file a saved social-media post into a personal library. You are given "
-    "the post's caption and the library's EXISTING collections (each with its "
-    "existing sub-collections).\n\n"
+    "the post's caption, the library's EXISTING collections (each with its "
+    "existing sub-collections), and the posts already in the library whose "
+    "captions most resemble this one, with where each of those was filed.\n\n"
     "Rules, in priority order:\n"
     f"1. First judge whether the caption itself carries enough real subject "
     f"matter to determine a topic. Generic hooks, reaction lines, dates, or "
@@ -125,6 +127,17 @@ COLLECTION_SYSTEM_PROMPT = (
     "2. Otherwise, STRONGLY prefer reusing an existing collection that "
     "actually matches the caption's real content. Only invent a new one if "
     "the caption clearly does not belong in any existing one.\n"
+    "2b. Weigh the SIMILAR POSTS heavily: they show where this library "
+    "actually puts posts like this one, which the collection names alone "
+    "cannot tell you. A similar post marked [user-placed] was filed by the "
+    "user personally and is stronger evidence than one this classifier "
+    "placed unaided - where they disagree, follow the user. But similar "
+    "WORDING is not the same as the same TOPIC: a neighbour is evidence to "
+    "weigh, never an instruction to copy, and a caption that plainly "
+    "belongs elsewhere goes elsewhere.\n"
+    "2c. Do NOT let a sub-collection name pull a post onto the wrong "
+    "collection. Matching a narrow name is not a reason to file a post on a "
+    "shelf whose subject it does not share.\n"
     "3. Give it a sub-collection whenever the caption's content is specific "
     "enough to name one narrower than the collection itself (e.g. \"Bicep "
     "Workouts\" under \"Fitness\", \"Cold Outreach\" under \"Sales\") — do "
@@ -181,14 +194,22 @@ class GroqQueryIntent(_GroqChatAdapter):
 
 class GroqCollectionAssigner(_GroqChatAdapter):
     def assign(
-        self, caption: str, known: dict[str, list[str]]
+        self,
+        caption: str,
+        known: dict[str, list[str]],
+        neighbours: list[NeighbourPlacement],
     ) -> CollectionAssignment:
         known_block = (
             json.dumps(known, indent=2) if known else "(none yet — this is the first post)"
         )
         content = self._complete(
             system_prompt=COLLECTION_SYSTEM_PROMPT,
-            user_content=f"Existing collections:\n{known_block}\n\nCaption:\n{caption}",
+            user_content=(
+                f"Existing collections:\n{known_block}\n\n"
+                f"Similar posts already in the library:\n"
+                f"{_format_neighbours(neighbours)}\n\n"
+                f"Caption:\n{caption}"
+            ),
             temperature=0.0,
         )
         return _parse_assignment(content, known)
@@ -201,6 +222,29 @@ class GroqSummarizer(_GroqChatAdapter):
         return self._complete(
             system_prompt=SUMMARY_SYSTEM_PROMPT, user_content=user_content, temperature=0.3
         )
+
+
+def _format_neighbours(neighbours: list[NeighbourPlacement]) -> str:
+    """The similar posts, each with where it was filed and by whom.
+
+    A placement the user made is labelled as such: the model is told to
+    prefer it over one the classifier made unaided, so that a mistake this
+    classifier already made cannot quietly become the precedent for the next
+    reel that resembles it.
+    """
+    if not neighbours:
+        return "(none yet — this is the first post)"
+    lines = []
+    for neighbour in neighbours:
+        where = neighbour.collection
+        if neighbour.subcollection:
+            where = f"{where} > {neighbour.subcollection}"
+        who = " [user-placed]" if neighbour.user_placed else ""
+        lines.append(
+            f'- filed under {where}{who} (similarity {neighbour.similarity:.2f}): '
+            f'"{neighbour.caption[:160]}"'
+        )
+    return "\n".join(lines)
 
 
 def _format_source(source: SummarySource) -> str:

@@ -16,6 +16,7 @@ from reel_vault.models import (
     AggregateAnswer,
     AlreadySaved,
     Answer,
+    Correction,
     ExtractedPost,
     ExtractionFailed,
     ListAnswer,
@@ -52,6 +53,18 @@ DEFAULT_TOP_K_SINGLE = 5
 DEFAULT_TOP_K_LIST = 50
 DEFAULT_TOP_K_AGGREGATE = 15
 
+# How many already-filed reels are shown to the collection assigner as
+# evidence. Enough to show a pattern, few enough that one loud neighbour
+# cannot decide the answer on its own.
+DEFAULT_NEIGHBOUR_COUNT = 5
+
+# How alike two captions must be before one is worth citing as evidence
+# about the other. Without a floor, a genuinely novel reel is handed five
+# unrelated placements scoring 0.15-0.18 and told they are precedent —
+# noise presented in the same shape as a real signal, which is worse than
+# saying nothing.
+DEFAULT_NEIGHBOUR_FLOOR = 0.25
+
 
 class Vault:
     def __init__(
@@ -68,6 +81,8 @@ class Vault:
         top_k_single: int = DEFAULT_TOP_K_SINGLE,
         top_k_list: int = DEFAULT_TOP_K_LIST,
         top_k_aggregate: int = DEFAULT_TOP_K_AGGREGATE,
+        neighbour_count: int = DEFAULT_NEIGHBOUR_COUNT,
+        neighbour_floor: float = DEFAULT_NEIGHBOUR_FLOOR,
     ) -> None:
         self._caption_fetcher = caption_fetcher
         self._tagger = tagger
@@ -77,6 +92,8 @@ class Vault:
         self._query_intent = query_intent
         self._summarizer = summarizer
         self._match_threshold = match_threshold
+        self._neighbour_count = neighbour_count
+        self._neighbour_floor = neighbour_floor
         self._top_k = {
             QueryKind.SINGLE: top_k_single,
             QueryKind.LIST: top_k_list,
@@ -103,7 +120,18 @@ class Vault:
 
         tags = self._tagger.tag(post.caption)
         known = self._store.known_collections()
-        assignment = self._collection_assigner.assign(post.caption, known)
+        # Where comparable reels actually ended up, which the list of
+        # collection names cannot convey: names say what shelves exist, not
+        # what goes on them.
+        caption_embedding = self._embedder.embed(post.caption)
+        neighbours = [
+            neighbour
+            for neighbour in self._store.find_similar_captions(
+                caption_embedding, self._neighbour_count
+            )
+            if neighbour.similarity >= self._neighbour_floor
+        ]
+        assignment = self._collection_assigner.assign(post.caption, known, neighbours)
 
         if assignment.collection == UNCATEGORIZED:
             # Nothing is embedded yet: a reel is embedded together with the
@@ -113,6 +141,7 @@ class Vault:
                 url=normalized,
                 caption=post.caption,
                 tags=tags,
+                caption_embedding=caption_embedding,
                 author_handle=post.author_handle,
                 author_name=post.author_name,
                 known_collections=known,
@@ -127,6 +156,7 @@ class Vault:
             subcollection=assignment.subcollection,
             author_handle=post.author_handle,
             author_name=post.author_name,
+            caption_embedding=caption_embedding,
         )
         return self._persist(reel, thumbnail_url=post.thumbnail_url)
 
@@ -140,13 +170,17 @@ class Vault:
         subcollection: str | None,
         author_handle: str | None,
         author_name: str | None,
+        caption_embedding: list[float] | None = None,
+        user_placed: bool = False,
     ) -> SavedReel:
-        """Assemble a reel, embedding it the way it will later be searched.
+        """Assemble a reel with both of the embeddings it needs.
 
-        The single place a reel's embedding is computed, so that the text it
-        covers — caption plus the shelf and tags it was filed under — cannot
-        differ between a reel saved outright and one the user had to place by
-        hand."""
+        The single place either is computed, so the text they cover cannot
+        differ between a reel saved outright and one the user placed by hand.
+        The retrieval embedding covers the caption plus the shelf and tags;
+        the caption embedding covers only the caption, and is what later
+        reels are compared against when deciding where they belong.
+        """
         return SavedReel(
             url=url,
             caption=caption,
@@ -154,10 +188,16 @@ class Vault:
             embedding=self._embedder.embed(
                 embedding_text(caption, tags, collection, subcollection)
             ),
+            caption_embedding=(
+                caption_embedding
+                if caption_embedding is not None
+                else self._embedder.embed(caption)
+            ),
             collection=collection,
             subcollection=subcollection,
             author_handle=author_handle,
             author_name=author_name,
+            user_placed=user_placed,
         )
 
     def _persist(self, reel: SavedReel, *, thumbnail_url: str | None) -> SaveResult:
@@ -188,6 +228,10 @@ class Vault:
             subcollection=subcollection,
             author_handle=pending.author_handle,
             author_name=pending.author_name,
+            caption_embedding=pending.caption_embedding,
+            # The user answered the question themselves, so this placement
+            # carries their authority when later reels are placed near it.
+            user_placed=True,
         )
         return self._persist(reel, thumbnail_url=pending.thumbnail_url)
 
@@ -219,6 +263,7 @@ class Vault:
             existing,
             collection=collection,
             subcollection=subcollection,
+            user_placed=True,
             embedding=self._embedder.embed(
                 embedding_text(
                     existing.caption, existing.tags, collection, subcollection
@@ -226,7 +271,54 @@ class Vault:
             ),
         )
         self._store.update(moved)
+        self._store.record_correction(
+            Correction(
+                url=normalized,
+                from_collection=existing.collection,
+                from_subcollection=existing.subcollection,
+                to_collection=collection,
+                to_subcollection=subcollection,
+                from_user_placed=existing.user_placed,
+            )
+        )
         return moved
+
+    def undo_last_move(self, url: str) -> SavedReel | None:
+        """Put a reel back where it was before the last move, or None if it
+        has not been moved (or is not in the vault at all).
+
+        The record of the move is removed rather than reversed: afterwards
+        the reel sits where it was originally put, and a correction left
+        standing would claim a person had chosen that. Restoring
+        `user_placed` from the record matters for the same reason — undoing
+        a move must not leave behind a placement carrying an authority
+        nobody exercised.
+        """
+        normalized = normalize_reel_url(url)
+        correction = self._store.pop_last_correction(normalized)
+        if correction is None:
+            return None
+
+        existing = self._store.find_by_url(normalized)
+        if existing is None:
+            return None
+
+        restored = replace(
+            existing,
+            collection=correction.from_collection,
+            subcollection=correction.from_subcollection,
+            user_placed=correction.from_user_placed,
+            embedding=self._embedder.embed(
+                embedding_text(
+                    existing.caption,
+                    existing.tags,
+                    correction.from_collection,
+                    correction.from_subcollection,
+                )
+            ),
+        )
+        self._store.update(restored)
+        return restored
 
     def attach_thumbnail(self, url: str, thumbnail_ref: str) -> None:
         """Record a durable reference to a saved reel's picture. Only the
