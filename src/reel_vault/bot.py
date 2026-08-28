@@ -39,6 +39,29 @@ def _esc(text: str) -> str:
     return html.escape(text)
 
 
+def _render_summary(text: str) -> str:
+    """Turn the summarizer's plain text into Telegram HTML.
+
+    Escaped first, marked up second, so nothing the model writes can be read
+    as markup. Letting the model emit HTML directly would put every reply one
+    malformed tag away from Telegram rejecting the whole message, and a
+    rejected send is a user who gets no answer at all rather than an ugly one.
+
+    (This reply used to be escaped and then sent with no parse mode at all,
+    which is why an apostrophe reached the user as a literal "&#x27;".)
+    """
+    rendered = []
+    for line in _esc(text).splitlines():
+        line = line.strip()
+        if line.startswith("## "):
+            rendered.append(f"<b>{line[3:].strip()}</b>")
+        elif line.startswith("- "):
+            rendered.append(f"• {line[2:].strip()}")
+        else:
+            rendered.append(line)
+    return "\n".join(rendered)
+
+
 def _format_location(reel: SavedReel) -> str:
     if reel.subcollection:
         return f"{_esc(reel.collection)} › {_esc(reel.subcollection)}"
@@ -258,7 +281,9 @@ class ReelVaultBot:
             # The vault has always returned the reels behind a synthesized
             # answer; the reply used to drop them, leaving no way to go and
             # watch what the answer was built from.
-            await message.reply_text(_esc(answer.text))
+            await message.reply_text(
+                _render_summary(answer.text), parse_mode=ParseMode.HTML
+            )
             await self._send_reel_cards(message, answer.reels)
         elif isinstance(answer, NoMatch):
             await message.reply_text(NO_MATCH_REPLY)

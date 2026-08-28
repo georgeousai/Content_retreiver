@@ -8,9 +8,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from telegram.constants import ParseMode
 from telegram.error import TelegramError
 
-from reel_vault.bot import ReelVaultBot
+from reel_vault.bot import ReelVaultBot, _render_summary
 from reel_vault.models import (
     UNCATEGORIZED,
     CollectionAssignment,
@@ -328,3 +329,36 @@ async def test_plain_text_query_delegates_to_ask(bot: ReelVaultBot) -> None:
 
     reply = message.reply_text.await_args.args[0]
     assert "instagram.com/p/ABC" in reply
+
+
+def test_a_summarys_apostrophes_reach_the_user_as_apostrophes() -> None:
+    """Live failure: "Dev's Vlog Diary" arrived as "Dev&#x27;s Vlog Diary".
+    The text was HTML-escaped and then sent with no parse mode, so Telegram
+    had no reason to turn the entity back into a character."""
+    assert _render_summary("Dev's Vlog Diary") == "Dev&#x27;s Vlog Diary"
+
+
+async def test_a_summary_is_sent_in_html_so_its_escaping_is_undone(
+    bot: ReelVaultBot,
+) -> None:
+    assert isinstance(bot._vault.save_reel("https://instagram.com/reel/ABC"), Saved)
+
+    message = _make_message("summarize my ai reels")
+    await bot._on_message(_make_update(message), MagicMock())
+
+    summary_call = message.reply_text.await_args_list[0]
+    assert summary_call.kwargs.get("parse_mode") == ParseMode.HTML
+
+
+def test_summary_headings_and_bullets_become_telegram_markup() -> None:
+    rendered = _render_summary("## Getting unstuck\n- Ask what you are avoiding")
+
+    assert rendered == "<b>Getting unstuck</b>\n\u2022 Ask what you are avoiding"
+
+
+def test_markup_in_a_summary_is_inert_rather_than_rendered() -> None:
+    """The markers are applied after escaping, so a caption quoted into the
+    answer cannot close a tag the bot opened and break the whole message."""
+    rendered = _render_summary("He said <b>never</b> & meant it")
+
+    assert rendered == "He said &lt;b&gt;never&lt;/b&gt; &amp; meant it"
