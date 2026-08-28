@@ -10,6 +10,47 @@ broke or were missing, discovered after the fact.
 
 ---
 
+## The summarizer sometimes credited a caption with answering a question it never addressed
+
+**Symptom:** `"how do I grow my personal brand"` against a single matched
+reel — caption: `"If you want the full list of habits, COMMENT the word
+'HABITS'..."` (no mention of personal branding anywhere) — returned:
+
+> Carina Miller, a business coach, says she has a full list of habits that
+> can help grow a personal brand.
+
+That claim is not in the caption. It looked like a nice answer, which is
+exactly what made it dangerous: it read as more informative than the honest
+"none of the captions address this," while actually being wrong.
+
+**Confirmed real, not a one-off:** ran the identical query/caption 10 times.
+**2/10 invented the connection.** Ran again at `temperature=0.0` (down from
+0.3, on the theory it was a stochastic slip): **4/10** — temperature made it
+*worse*, within noise, and confirmed temperature wasn't the mechanism. The
+model was bridging a topical gap ("habits" ≈ "personal brand," adjacent
+enough to feel connected) rather than randomly hallucinating.
+
+**Cause:** the existing rule — *"Report only what the captions actually say.
+Never invent"* — was abstract, and abstract rules don't reliably suppress a
+model's tendency to supply a missing connective claim when two things are
+topically adjacent but not actually linked.
+
+**Fix:** added a rule naming this exact failure shape with a concrete
+worked example — this caption, this query, the wrong answer and the right
+one, spelled out by name. Not a hypothetical; the literal case that failed.
+
+**Result:** 10/10 correct after the change, re-run against the identical
+caption and query that produced the original failure.
+
+**Lesson for future prompt work:** when an abstract instruction ("don't
+invent") fails at a real rate under test, the fix is a concrete
+counter-example naming the specific failure, not a broader restatement of
+the same abstract rule.
+
+**Commit:** `61bde6c` — Stop the summarizer from crediting a caption with answering a question it never addressed
+
+---
+
 ## The classifier repeated mistakes, and moves could not be taken back
 
 **Symptom:** Two gaps left open after the Move feature. Correcting the same
