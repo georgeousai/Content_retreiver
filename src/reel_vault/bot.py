@@ -3,10 +3,12 @@ and relays their results as chat replies — no vault logic lives here."""
 
 from __future__ import annotations
 
+import html
 import logging
 import re
 
-from telegram import InputMediaPhoto, Message, Update
+from telegram import Message, Update
+from telegram.constants import ParseMode
 from telegram.error import TelegramError
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
@@ -38,17 +40,20 @@ INSTAGRAM_REEL_URL = re.compile(
 
 INSTAGRAM_URL = re.compile(r"https?://(?:www\.)?instagram\.com/\S*", re.IGNORECASE)
 
-# Telegram caps a media group at 10, so longer runs of reels go out as
-# several albums.
-MEDIA_GROUP_LIMIT = 10
-
 NO_MATCH_REPLY = "Nothing in the vault matches that."
+
+
+def _esc(text: str) -> str:
+    """Escape text bound for an HTML-parse-mode message. Author names and
+    tags come from Instagram captions and an LLM, not from us — either can
+    contain `<`, `>`, or `&`, which would otherwise break the markup."""
+    return html.escape(text)
 
 
 def _format_location(reel: SavedReel) -> str:
     if reel.subcollection:
-        return f"{reel.collection} › {reel.subcollection}"
-    return reel.collection
+        return f"{_esc(reel.collection)} › {_esc(reel.subcollection)}"
+    return _esc(reel.collection)
 
 
 def _format_collection_prompt(known: dict[str, list[str]]) -> str:
@@ -81,47 +86,43 @@ def _parse_collection_reply(text: str) -> tuple[str, str | None]:
 
 def _describe_reel(reel: SavedReel, *, lead: str) -> str:
     """The collection/tags/author block every single-reel reply shares, under
-    whatever line introduces it."""
-    tags_text = ", ".join(f"#{tag}" for tag in reel.tags) if reel.tags else "(no tags)"
-    lines = [lead, f"📁 {_format_location(reel)}", f"🏷️ {tags_text}"]
+    whatever line introduces it. HTML parse mode gives the labels real
+    structure instead of a wall of emoji-prefixed plain text."""
+    tags_text = ", ".join(f"#{_esc(tag)}" for tag in reel.tags) if reel.tags else "—"
+    lines = [
+        lead,
+        f"📁 <b>{_format_location(reel)}</b>",
+        f"🏷️ {tags_text}",
+    ]
     if reel.author_handle:
-        lines.append(f"👤 @{reel.author_handle}")
+        lines.append(f"👤 @{_esc(reel.author_handle)}")
     return "\n".join(lines)
 
 
 def _format_reel_detail(reel: SavedReel) -> str:
     """One reel, in full — the reply when the user wanted exactly this one,
     led by the link so it is tappable."""
-    return _describe_reel(reel, lead=reel.url)
+    return _describe_reel(reel, lead=f'<a href="{_esc(reel.url)}">{_esc(reel.url)}</a>')
 
 
-def _format_reel_list(
-    reels: list[SavedReel],
-    *,
-    author: str | None = None,
-    collection: str | None = None,
+def _format_list_header(
+    reel_count: int, *, author: str | None = None, collection: str | None = None
 ) -> str:
-    """Many reels, one line each — enough to scan and pick, not the full
-    detail block repeated N times."""
-    if not reels:
-        if author:
-            return f"Nothing saved from @{author} yet."
-        if collection:
-            return f"Nothing saved in {collection} yet."
-        return NO_MATCH_REPLY
-
-    count = f"{len(reels)} {'reel' if len(reels) == 1 else 'reels'}"
+    """The one-line lead-in before a run of per-reel cards."""
+    count = f"{reel_count} {'reel' if reel_count == 1 else 'reels'}"
     if author:
-        header = f"{count} from @{author}:"
-    elif collection:
-        header = f"{count} in {collection}:"
-    else:
-        header = f"{count}:"
-    lines = []
-    for reel in reels:
-        suffix = f" — @{reel.author_handle}" if reel.author_handle else ""
-        lines.append(f"• {reel.url} ({_format_location(reel)}){suffix}")
-    return "\n".join([header, *lines])
+        return f"{count} from @{_esc(author)}:"
+    if collection:
+        return f"{count} in <b>{_esc(collection)}</b>:"
+    return f"{count}:"
+
+
+def _format_empty_list_reply(*, author: str | None = None, collection: str | None = None) -> str:
+    if author:
+        return f"Nothing saved from @{author} yet."
+    if collection:
+        return f"Nothing saved in {collection} yet."
+    return NO_MATCH_REPLY
 
 
 def _format_saved_reply(reel: SavedReel, *, already_saved: bool) -> str:
@@ -230,15 +231,17 @@ class ReelVaultBot:
         """
         text = _format_saved_reply(result.reel, already_saved=False)
         if not result.thumbnail_url:
-            await message.reply_text(text)
+            await message.reply_text(text, parse_mode=ParseMode.HTML)
             return
 
         try:
-            sent = await message.reply_photo(photo=result.thumbnail_url, caption=text)
+            sent = await message.reply_photo(
+                photo=result.thumbnail_url, caption=text, parse_mode=ParseMode.HTML
+            )
         except TelegramError as exc:
             # A picture is a nicety; the reel is already saved either way.
             logger.info("Could not send thumbnail for %s: %s", result.reel.url, exc)
-            await message.reply_text(text)
+            await message.reply_text(text, parse_mode=ParseMode.HTML)
             return
 
         if sent.photo:
@@ -250,22 +253,24 @@ class ReelVaultBot:
         if isinstance(answer, SingleItemAnswer):
             await self._reply_with_reel(message, answer.reel)
         elif isinstance(answer, ListAnswer):
-            await message.reply_text(
-                _format_reel_list(
-                    answer.reels,
-                    author=answer.author,
-                    collection=answer.collection,
+            if not answer.reels:
+                await message.reply_text(
+                    _format_empty_list_reply(author=answer.author, collection=answer.collection)
                 )
+                return
+            await message.reply_text(
+                _format_list_header(
+                    len(answer.reels), author=answer.author, collection=answer.collection
+                ),
+                parse_mode=ParseMode.HTML,
             )
-            await self._send_thumbnails(message, answer.reels)
+            await self._send_reel_cards(message, answer.reels)
         elif isinstance(answer, AggregateAnswer):
             # The vault has always returned the reels behind a synthesized
             # answer; the reply used to drop them, leaving no way to go and
             # watch what the answer was built from.
-            await message.reply_text(
-                f"{answer.text}\n\n{_format_reel_list(answer.reels)}"
-            )
-            await self._send_thumbnails(message, answer.reels)
+            await message.reply_text(_esc(answer.text))
+            await self._send_reel_cards(message, answer.reels)
         elif isinstance(answer, NoMatch):
             await message.reply_text(NO_MATCH_REPLY)
 
@@ -275,27 +280,18 @@ class ReelVaultBot:
         """One reel, as a picture the user can recognize where we have one."""
         body = text if text is not None else _format_reel_detail(reel)
         if reel.thumbnail_ref:
-            await message.reply_photo(photo=reel.thumbnail_ref, caption=body)
-        else:
-            await message.reply_text(body)
-
-    async def _send_thumbnails(self, message: Message, reels: list[SavedReel]) -> None:
-        """Pictures to scan alongside the list — every matched reel that has
-        one, in albums of ten. Reels saved before thumbnails existed have
-        none, and are already in the text list."""
-        pictures = [
-            (reel.thumbnail_ref, reel.url) for reel in reels if reel.thumbnail_ref
-        ]
-
-        for start in range(0, len(pictures), MEDIA_GROUP_LIMIT):
-            batch = pictures[start : start + MEDIA_GROUP_LIMIT]
-            if len(batch) == 1:
-                ref, url = batch[0]
-                await message.reply_photo(photo=ref, caption=url)
-                continue
-            await message.reply_media_group(
-                [InputMediaPhoto(media=ref, caption=url) for ref, url in batch]
+            await message.reply_photo(
+                photo=reel.thumbnail_ref, caption=body, parse_mode=ParseMode.HTML
             )
+        else:
+            await message.reply_text(body, parse_mode=ParseMode.HTML)
+
+    async def _send_reel_cards(self, message: Message, reels: list[SavedReel]) -> None:
+        """One message per reel — the picture sits directly under its own
+        link and details rather than in a separate album disconnected from
+        the text list above it."""
+        for reel in reels:
+            await self._reply_with_reel(message, reel)
 
 
 def build_bot(vault: Vault, token: str) -> ReelVaultBot:

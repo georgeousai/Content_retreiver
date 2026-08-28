@@ -161,9 +161,9 @@ async def test_aggregate_reply_carries_the_reels_behind_the_answer(
     message = _make_message("summarize my ai reels")
     await bot._on_message(_make_update(message), MagicMock())
 
-    reply = message.reply_text.await_args.args[0]
-    assert "a caption about ai" in reply  # the synthesized text
-    assert "instagram.com/reel/ABC" in reply  # and the reel behind it
+    all_replies = "\n".join(call.args[0] for call in message.reply_text.await_args_list)
+    assert "a caption about ai" in all_replies  # the synthesized text
+    assert "instagram.com/reel/ABC" in all_replies  # and the reel behind it
 
 
 async def test_list_reply_shows_every_match_not_just_the_best(
@@ -181,9 +181,9 @@ async def test_list_reply_shows_every_match_not_just_the_best(
     message = _make_message("show me my ai agents reels")
     await bot._on_message(_make_update(message), MagicMock())
 
-    reply = message.reply_text.await_args.args[0]
-    assert "instagram.com/reel/A1" in reply
-    assert "instagram.com/reel/A2" in reply
+    all_replies = "\n".join(call.args[0] for call in message.reply_text.await_args_list)
+    assert "instagram.com/reel/A1" in all_replies
+    assert "instagram.com/reel/A2" in all_replies
 
 
 def _photo_reply(file_id: str) -> MagicMock:
@@ -273,7 +273,12 @@ async def test_a_reel_saved_without_a_thumbnail_still_replies_as_text(
     assert "instagram.com/reel/ABC" in message.reply_text.await_args.args[0]
 
 
-async def test_list_reply_sends_the_matching_reels_pictures(bot: ReelVaultBot) -> None:
+async def test_list_reply_sends_each_matching_reel_as_its_own_card(
+    bot: ReelVaultBot,
+) -> None:
+    """Each reel is its own message — the picture directly under its own
+    link and details, not batched into a separate album disconnected from
+    a shared text list."""
     bot._vault = make_vault(
         captions={
             "https://instagram.com/reel/A1": "ai agents explained",
@@ -286,18 +291,16 @@ async def test_list_reply_sends_the_matching_reels_pictures(bot: ReelVaultBot) -
     message = _make_message("show me my ai agents reels")
     await bot._on_message(_make_update(message), MagicMock())
 
-    message.reply_media_group.assert_awaited_once()
-    media = message.reply_media_group.await_args.args[0]
-    assert {item.media for item in media} == {"file-1", "file-2"}
-    # The full list still goes out as text, so nothing is hidden behind photos.
-    assert "instagram.com/reel/A1" in message.reply_text.await_args.args[0]
+    assert message.reply_photo.await_count == 2
+    photos = {call.kwargs["photo"] for call in message.reply_photo.await_args_list}
+    assert photos == {"file-1", "file-2"}
+    captions = [call.kwargs["caption"] for call in message.reply_photo.await_args_list]
+    assert any("instagram.com/reel/A1" in c for c in captions)
+    assert any("instagram.com/reel/A2" in c for c in captions)
 
 
-async def test_more_than_one_album_of_matches_still_all_get_pictures(
-    bot: ReelVaultBot,
-) -> None:
-    """Telegram caps an album at 10; a 12-match browse must not silently drop
-    the last two pictures."""
+async def test_a_large_list_still_gets_every_reel_a_card(bot: ReelVaultBot) -> None:
+    """A 12-match browse must not silently drop any reel's picture."""
     captions = {
         f"https://instagram.com/reel/N{i}": f"ai agents topic number{i}"
         for i in range(12)
@@ -309,13 +312,9 @@ async def test_more_than_one_album_of_matches_still_all_get_pictures(
     message = _make_message("show me my ai agents reels")
     await bot._on_message(_make_update(message), MagicMock())
 
-    sent = [
-        item.media
-        for call in message.reply_media_group.await_args_list
-        for item in call.args[0]
-    ]
-    assert len(sent) == 12
-    assert len(set(sent)) == 12
+    photos = [call.kwargs["photo"] for call in message.reply_photo.await_args_list]
+    assert len(photos) == 12
+    assert len(set(photos)) == 12
 
 
 async def test_plain_text_query_delegates_to_ask(bot: ReelVaultBot) -> None:
