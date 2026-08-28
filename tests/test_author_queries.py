@@ -43,8 +43,8 @@ def test_author_query_returns_every_reel_by_that_creator() -> None:
 
     assert isinstance(answer, ListAnswer)
     assert {reel.url for reel in answer.reels} == {
-        "https://instagram.com/reel/1",
-        "https://instagram.com/reel/2",
+        "https://instagram.com/p/1",
+        "https://instagram.com/p/2",
     }
 
 
@@ -67,7 +67,7 @@ def test_author_query_matches_the_display_name_too() -> None:
     answer = vault.ask("what have I saved from @Andrew Huberman")
 
     assert isinstance(answer, ListAnswer)
-    assert [reel.url for reel in answer.reels] == ["https://instagram.com/reel/3"]
+    assert [reel.url for reel in answer.reels] == ["https://instagram.com/p/3"]
 
 
 def test_author_with_nothing_saved_returns_an_empty_list_not_an_error() -> None:

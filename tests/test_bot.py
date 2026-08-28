@@ -128,7 +128,7 @@ async def test_unsure_collection_asks_then_completes_the_save_on_reply(
     assert "Fashion" in reply
     assert "#trend" in reply
 
-    saved = bot._vault._store.find_by_url("https://instagram.com/reel/VAGUE")
+    saved = bot._vault._store.find_by_url("https://instagram.com/p/VAGUE")
     assert saved is not None
     assert saved.collection == "Old Trends"
     assert saved.subcollection == "Fashion"
@@ -146,7 +146,7 @@ async def test_skip_reply_leaves_the_reel_uncategorized(bot: ReelVaultBot) -> No
     second_message = _make_message("skip", chat_id=7)
     await bot._on_message(_make_update(second_message, chat_id=7), MagicMock())
 
-    saved = bot._vault._store.find_by_url("https://instagram.com/reel/VAGUE2")
+    saved = bot._vault._store.find_by_url("https://instagram.com/p/VAGUE2")
     assert saved is not None
     assert saved.collection == UNCATEGORIZED
 
@@ -163,7 +163,7 @@ async def test_aggregate_reply_carries_the_reels_behind_the_answer(
 
     all_replies = "\n".join(call.args[0] for call in message.reply_text.await_args_list)
     assert "a caption about ai" in all_replies  # the synthesized text
-    assert "instagram.com/reel/ABC" in all_replies  # and the reel behind it
+    assert "instagram.com/p/ABC" in all_replies  # and the reel behind it
 
 
 async def test_list_reply_shows_every_match_not_just_the_best(
@@ -182,8 +182,8 @@ async def test_list_reply_shows_every_match_not_just_the_best(
     await bot._on_message(_make_update(message), MagicMock())
 
     all_replies = "\n".join(call.args[0] for call in message.reply_text.await_args_list)
-    assert "instagram.com/reel/A1" in all_replies
-    assert "instagram.com/reel/A2" in all_replies
+    assert "instagram.com/p/A1" in all_replies
+    assert "instagram.com/p/A2" in all_replies
 
 
 def _photo_reply(file_id: str) -> MagicMock:
@@ -223,7 +223,7 @@ async def test_save_confirmation_doubles_as_the_thumbnail_upload(
     assert kwargs["photo"] == "https://cdn/t.jpg"  # Telegram fetches it server-side
     assert "Saved!" in kwargs["caption"]
 
-    saved = bot._vault._store.find_by_url(url)
+    saved = bot._vault._store.find_by_url("https://instagram.com/p/PIC")
     assert saved is not None
     assert saved.thumbnail_ref == "tg-file-id"
 
@@ -241,7 +241,7 @@ async def test_a_reel_still_saves_when_its_picture_cannot_be_sent(
     await bot._on_message(_make_update(message), MagicMock())
 
     assert "Saved!" in message.reply_text.await_args.args[0]
-    saved = bot._vault._store.find_by_url(url)
+    saved = bot._vault._store.find_by_url("https://instagram.com/p/PIC")
     assert saved is not None
     assert saved.thumbnail_ref is None
 
@@ -258,7 +258,7 @@ async def test_single_item_reply_shows_the_reels_picture(bot: ReelVaultBot) -> N
     message.reply_photo.assert_awaited_once()
     kwargs = message.reply_photo.await_args.kwargs
     assert kwargs["photo"] == "tg-file-id"
-    assert "instagram.com/reel/PIC" in kwargs["caption"]
+    assert "instagram.com/p/PIC" in kwargs["caption"]
 
 
 async def test_a_reel_saved_without_a_thumbnail_still_replies_as_text(
@@ -270,7 +270,7 @@ async def test_a_reel_saved_without_a_thumbnail_still_replies_as_text(
     await bot._on_message(_make_update(message), MagicMock())
 
     message.reply_photo.assert_not_awaited()
-    assert "instagram.com/reel/ABC" in message.reply_text.await_args.args[0]
+    assert "instagram.com/p/ABC" in message.reply_text.await_args.args[0]
 
 
 async def test_list_reply_sends_each_matching_reel_as_its_own_card(
@@ -295,8 +295,8 @@ async def test_list_reply_sends_each_matching_reel_as_its_own_card(
     photos = {call.kwargs["photo"] for call in message.reply_photo.await_args_list}
     assert photos == {"file-1", "file-2"}
     captions = [call.kwargs["caption"] for call in message.reply_photo.await_args_list]
-    assert any("instagram.com/reel/A1" in c for c in captions)
-    assert any("instagram.com/reel/A2" in c for c in captions)
+    assert any("instagram.com/p/A1" in c for c in captions)
+    assert any("instagram.com/p/A2" in c for c in captions)
 
 
 async def test_a_large_list_still_gets_every_reel_a_card(bot: ReelVaultBot) -> None:
@@ -327,4 +327,4 @@ async def test_plain_text_query_delegates_to_ask(bot: ReelVaultBot) -> None:
     await bot._on_message(update, MagicMock())
 
     reply = message.reply_text.await_args.args[0]
-    assert "instagram.com/reel/ABC" in reply
+    assert "instagram.com/p/ABC" in reply

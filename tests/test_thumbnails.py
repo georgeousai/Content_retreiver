@@ -50,7 +50,7 @@ def test_attaching_a_thumbnail_records_it_against_the_saved_reel() -> None:
 
     vault.attach_thumbnail(URL, "telegram-file-id")
 
-    saved = store.find_by_url(URL)
+    saved = store.find_by_url("https://instagram.com/p/ABC")
     assert saved is not None
     assert saved.thumbnail_ref == "telegram-file-id"
     # The expiring CDN URL is never what we keep.

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import html
 import logging
-import re
 
 from telegram import Message, Update
 from telegram.constants import ParseMode
@@ -25,20 +24,10 @@ from reel_vault.models import (
     SaveResult,
     SingleItemAnswer,
 )
+from reel_vault.urls import INSTAGRAM_URL, find_reel_url
 from reel_vault.vault import Vault
 
 logger = logging.getLogger(__name__)
-
-INSTAGRAM_REEL_URL = re.compile(
-    # Instagram's generic /p/ permalink covers photos, carousels, AND
-    # videos/reels depending on how the link was generated — a real reel
-    # share does not reliably come through as /reel/. Matching /p/ too was
-    # previously removed as scope creep, but that broke real reel shares.
-    r"https?://(?:www\.)?instagram\.com/(?:reel|reels|p)/[\w-]+/?\S*",
-    re.IGNORECASE,
-)
-
-INSTAGRAM_URL = re.compile(r"https?://(?:www\.)?instagram\.com/\S*", re.IGNORECASE)
 
 NO_MATCH_REPLY = "Nothing in the vault matches that."
 
@@ -149,10 +138,10 @@ class ReelVaultBot:
             return
 
         text = message.text.strip()
-        url_match = INSTAGRAM_REEL_URL.search(text)
+        reel_url = find_reel_url(text)
 
-        if url_match:
-            await self._handle_url(message, url_match.group(0))
+        if reel_url:
+            await self._handle_url(message, reel_url)
             return
 
         pending_url = self._pending_manual_caption.pop(chat_id, None)

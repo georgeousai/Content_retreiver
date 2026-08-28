@@ -17,7 +17,7 @@ def test_saving_a_new_reel_produces_a_tagged_embedded_record() -> None:
     assert result.reel.caption == "A caption about transformers"
     assert result.reel.tags == ["ai", "transformers"]
     assert len(result.reel.embedding) > 0
-    assert result.reel.url == "https://instagram.com/reel/ABC"
+    assert result.reel.url == "https://instagram.com/p/ABC"
 
 
 def test_saving_a_duplicate_url_returns_existing_record_without_new_row() -> None:

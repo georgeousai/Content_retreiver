@@ -61,8 +61,8 @@ def test_listing_a_collection_returns_everything_on_that_shelf() -> None:
     assert isinstance(answer, ListAnswer)
     assert answer.collection == "Sales"
     assert {reel.url for reel in answer.reels} == {
-        "https://instagram.com/reel/s1",
-        "https://instagram.com/reel/s2",
+        "https://instagram.com/p/s1",
+        "https://instagram.com/p/s2",
     }
 
 

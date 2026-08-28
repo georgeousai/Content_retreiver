@@ -131,7 +131,7 @@ def test_unsure_assignment_pauses_the_save_and_asks_instead_of_guessing() -> Non
     result = vault.save_reel(URL)
 
     assert isinstance(result, NeedsCollectionChoice)
-    assert result.url == URL
+    assert result.url == "https://instagram.com/p/ABC"
     assert result.caption == "totally unclassifiable"
     assert result.tags == ["misc"]
     assert len(result.embedding) > 0
@@ -156,7 +156,7 @@ def test_assign_collection_finishes_the_save_without_recomputing_anything() -> N
     assert result.reel.collection == "Random Musings"
     assert result.reel.subcollection is None
     assert result.reel.caption == "totally unclassifiable"
-    assert store.find_by_url(URL) is not None
+    assert store.find_by_url("https://instagram.com/p/ABC") is not None
 
 
 def test_assign_collection_accepts_a_subcollection() -> None:

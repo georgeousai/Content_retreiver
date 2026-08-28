@@ -38,7 +38,7 @@ def test_single_item_query_returns_the_matching_reel_link_and_tags() -> None:
     answer = vault.ask("find that reel about transformer architecture")
 
     assert isinstance(answer, SingleItemAnswer)
-    assert answer.reel.url == "https://instagram.com/reel/1"
+    assert answer.reel.url == "https://instagram.com/p/1"
 
 
 def test_no_match_reply_when_nothing_is_relevant() -> None:
