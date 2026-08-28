@@ -17,6 +17,7 @@ from reel_vault.models import (
     SavedReel,
     SummarySource,
 )
+from reel_vault.search import keyword_score, merge_hits, metadata_text
 from reel_vault.urls import normalize_reel_url
 
 
@@ -152,7 +153,7 @@ class InMemoryReelStore:
         ]
 
     def search(
-        self, query_embedding: list[float], top_k: int
+        self, query_embedding: list[float], terms: list[str], top_k: int
     ) -> list[tuple[SavedReel, float]]:
         self.search_calls.append(top_k)
         scored = [
@@ -160,7 +161,38 @@ class InMemoryReelStore:
             for reel in self._by_url.values()
         ]
         scored.sort(key=lambda pair: pair[1], reverse=True)
-        return scored[:top_k]
+        return merge_hits(scored[:top_k], self._keyword_hits(terms), top_k)
+
+    def _keyword_hits(self, terms: list[str]) -> list[tuple[SavedReel, float]]:
+        """The keyword arm, standing in for Postgres's english text search.
+        `_stems_alike` is a deliberately crude substitute for real stemming —
+        enough that "interview" reaches a sub-collection named "Interviews",
+        which is the behaviour these tests are about."""
+        hits = []
+        for reel in self._by_url.values():
+            words = set(
+                metadata_text(reel.tags, reel.collection, reel.subcollection)
+                .casefold()
+                .split()
+            )
+            matched = sum(
+                any(_stems_alike(term, word) for word in words) for term in terms
+            )
+            score = keyword_score(matched, len(terms))
+            if score > 0:
+                hits.append((reel, score))
+        return hits
+
+
+def _stems_alike(term: str, word: str) -> bool:
+    """Whether a query term and a metadata word are the same word. The length
+    floor keeps a prefix rule from making every short word match everything —
+    without it "ai" would match "aim", "air", and "aircraft"."""
+    if term == word:
+        return True
+    return (len(term) >= 4 and word.startswith(term)) or (
+        len(word) >= 4 and term.startswith(word)
+    )
 
 
 class FakeQueryIntent:

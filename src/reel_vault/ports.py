@@ -75,9 +75,20 @@ class ReelStore(Protocol):
         ...
 
     def search(
-        self, query_embedding: list[float], top_k: int
+        self, query_embedding: list[float], terms: list[str], top_k: int
     ) -> list[tuple[SavedReel, float]]:
-        """Return up to `top_k` (reel, cosine_similarity) pairs, best match first."""
+        """Return up to `top_k` (reel, relevance) pairs, best match first.
+
+        Hybrid: `query_embedding` matches captions by meaning, `terms` match
+        the curated metadata (collection, sub-collection, tags) by word, and
+        the two rankings are merged. Neither arm alone was enough — a reel
+        filed under "Interviews" was unreachable by a query about interviews
+        because only captions were searched, while a reel whose caption is
+        "5yrs ago this wasn't a thing" is unreachable by word.
+
+        Scores from both arms share one 0-1 scale so the caller can apply a
+        single relevance threshold; see `reel_vault.search`.
+        """
         ...
 
 

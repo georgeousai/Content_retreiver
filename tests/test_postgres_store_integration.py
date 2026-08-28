@@ -143,7 +143,7 @@ def test_search_results_carry_collection_and_author(store) -> None:
         )
     )
 
-    results = store.search(embedding, top_k=1)
+    results = store.search(embedding, [], top_k=1)
 
     reel, _ = results[0]
     assert reel.collection == "AI"
@@ -156,7 +156,7 @@ def test_search_returns_similarity_scores(store) -> None:
     embedding = [0.0] * 383 + [1.0]
     store.save(_reel(url, embedding=embedding))
 
-    results = store.search(embedding, top_k=5)
+    results = store.search(embedding, [], top_k=5)
 
     assert results, "expected at least the reel just saved"
     top_reel, top_similarity = results[0]

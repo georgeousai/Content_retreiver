@@ -75,14 +75,18 @@ class ExtractionFailed:
 @dataclass(frozen=True)
 class NeedsCollectionChoice:
     """The collection assigner wasn't confident enough to pick one on its
-    own. Everything already computed (caption, tags, embedding, author) is
-    carried here so finishing the save via `Vault.assign_collection` never
-    needs to re-fetch, re-tag, or re-embed."""
+    own. What was already computed (caption, tags, author) is carried here so
+    finishing the save via `Vault.assign_collection` never needs to re-fetch
+    or re-tag.
+
+    The embedding is deliberately not among them. A reel is embedded together
+    with the collection it is filed under, and that is the one thing this
+    result does not yet know — carrying an embedding computed without it
+    would file the reel under one name and make it findable by another."""
 
     url: str
     caption: str
     tags: list[str]
-    embedding: list[float]
     author_handle: str | None
     author_name: str | None
     known_collections: dict[str, list[str]]

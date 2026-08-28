@@ -37,6 +37,7 @@ from reel_vault.ports import (
     Summarizer,
     Tagger,
 )
+from reel_vault.search import embedding_text, search_terms
 from reel_vault.urls import normalize_reel_url
 
 logger = logging.getLogger(__name__)
@@ -102,33 +103,61 @@ class Vault:
         tags = self._tagger.tag(post.caption)
         known = self._store.known_collections()
         assignment = self._collection_assigner.assign(post.caption, known)
-        # Computed regardless of outcome so a follow-up `assign_collection`
-        # call never needs to re-tag, re-embed, or re-upload the thumbnail.
-        embedding = self._embedder.embed(post.caption)
 
         if assignment.collection == UNCATEGORIZED:
+            # Nothing is embedded yet: a reel is embedded together with the
+            # collection it is filed under, and that is exactly what this
+            # outcome is asking the user for.
             return NeedsCollectionChoice(
                 url=normalized,
                 caption=post.caption,
                 tags=tags,
-                embedding=embedding,
                 author_handle=post.author_handle,
                 author_name=post.author_name,
                 known_collections=known,
                 thumbnail_url=post.thumbnail_url,
             )
 
-        reel = SavedReel(
+        reel = self._build_reel(
             url=normalized,
             caption=post.caption,
             tags=tags,
-            embedding=embedding,
             collection=assignment.collection,
             subcollection=assignment.subcollection,
             author_handle=post.author_handle,
             author_name=post.author_name,
         )
         return self._persist(reel, thumbnail_url=post.thumbnail_url)
+
+    def _build_reel(
+        self,
+        *,
+        url: str,
+        caption: str,
+        tags: list[str],
+        collection: str,
+        subcollection: str | None,
+        author_handle: str | None,
+        author_name: str | None,
+    ) -> SavedReel:
+        """Assemble a reel, embedding it the way it will later be searched.
+
+        The single place a reel's embedding is computed, so that the text it
+        covers — caption plus the shelf and tags it was filed under — cannot
+        differ between a reel saved outright and one the user had to place by
+        hand."""
+        return SavedReel(
+            url=url,
+            caption=caption,
+            tags=tags,
+            embedding=self._embedder.embed(
+                embedding_text(caption, tags, collection, subcollection)
+            ),
+            collection=collection,
+            subcollection=subcollection,
+            author_handle=author_handle,
+            author_name=author_name,
+        )
 
     def _persist(self, reel: SavedReel, *, thumbnail_url: str | None) -> SaveResult:
         """Write the reel, unless someone beat us to that URL between our
@@ -150,11 +179,10 @@ class Vault:
         """Finish a save that `save_reel` paused on `NeedsCollectionChoice`,
         now that the caller (the bot, having asked the user) supplies where
         it belongs."""
-        reel = SavedReel(
+        reel = self._build_reel(
             url=pending.url,
             caption=pending.caption,
             tags=pending.tags,
-            embedding=pending.embedding,
             collection=collection,
             subcollection=subcollection,
             author_handle=pending.author_handle,
@@ -184,11 +212,12 @@ class Vault:
         if classification.collection:
             return self._answer_from_collection(query, classification)
 
-        query_embedding = self._embedder.embed(query)
         matches = [
             reel
-            for reel, similarity in self._store.search(query_embedding, self._top_k[kind])
-            if similarity >= self._match_threshold
+            for reel, relevance in self._store.search(
+                self._embedder.embed(query), search_terms(query), self._top_k[kind]
+            )
+            if relevance >= self._match_threshold
         ]
 
         if not matches:
