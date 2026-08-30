@@ -65,7 +65,9 @@ def make_vault(
             item_extractor if item_extractor is not None else FakeItemExtractor()
         ),
         media_extractor=media_extractor,
-        condenser=condenser,
+        # Verbatim by default so a test can assert the video's words are
+        # findable without also having to model what condensing did to them.
+        condenser=condenser if condenser is not None else FakeCondenser(verbatim=True),
         match_threshold=match_threshold,
         **top_k_overrides,
     )

@@ -103,20 +103,27 @@ A third slice ([`.scratch/reel-vault-media-pipeline/`](.scratch/reel-vault-media
 
 The whole system is organized around one idea: **a core that knows nothing about the outside world.**
 
-The vault exposes exactly two operations — `save_reel(url)` and `ask(query)`. Everything environment-dependent (Telegram, Instagram, the LLM, the embedding model, the database) is injected as an adapter behind a `Protocol`. The vault never imports Telegram, Groq, or psycopg.
+The vault is entered through two operations — `save_reel(url)` and `ask(query)`. A handful of others exist for work that arrives *after* a save and cannot be part of it: `attach_thumbnail` (only the transport can mint a durable picture reference), `process_media`/`attach_media`/`resume_pending_media` (reading a reel's video takes minutes, so it happens off the save path), and `refile`/`undo_last_move` (the user overruling where a reel was filed). Each is a follow-up to a save, never a second way in.
+
+What does not vary: everything environment-dependent (Telegram, Instagram, the LLM, the embedding model, the transcriber, the vision model, the database) is injected as an adapter behind a `Protocol`. The vault never imports Telegram, Groq, Gemini, or psycopg.
 
 ```
 src/reel_vault/
 ├── vault.py        ← the seam: save_reel() and ask(). Pure logic.
 ├── models.py       ← SavedReel, and the result types the bot renders
 ├── ports.py        ← Protocols the vault depends on
+├── search.py       ← what a reel is indexed as, and what a query contributes
+├── media.py        ← which frames of a video are worth reading. Pure logic.
 ├── urls.py         ← URL normalization (the dedup key)
 ├── bot.py          ← Telegram wrapper. Thin — only relays results.
 ├── config.py       ← env loading
 ├── main.py         ← wires real adapters into the vault, starts polling
 └── adapters/
     ├── caption.py         ← oEmbed → yt-dlp fallback chain
-    ├── groq_llm.py        ← tagging, intent classification, summarization
+    ├── groq_llm.py        ← tagging, intent, summarize/compare/extract, condensing
+    ├── media.py           ← download → transcribe → sample frames → read → delete
+    ├── transcribe.py      ← Groq Whisper
+    ├── vision.py          ← Gemini Flash, reading sampled frames
     ├── embedder.py        ← local sentence-transformers, CPU only
     └── postgres_store.py  ← Postgres/pgvector persistence
 ```

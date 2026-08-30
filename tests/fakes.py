@@ -375,13 +375,24 @@ class FakeMediaExtractor:
 
 class FakeCondenser:
     """Condenses by keeping the first line, which is enough to tell a summary
-    apart from the raw text it came from."""
+    apart from the raw text it came from.
 
-    def __init__(self) -> None:
+    `verbatim` returns the text unchanged, for the many tests that care only
+    that the video's words reach retrieval and not what condensing did to
+    them. `raises` stands in for the API being down.
+    """
+
+    def __init__(self, *, verbatim: bool = False, raises: bool = False) -> None:
+        self.verbatim = verbatim
+        self.raises = raises
         self.calls: list[str] = []
 
     def condense(self, text: str) -> str:
         self.calls.append(text)
+        if self.raises:
+            raise RuntimeError("condenser is down")
+        if self.verbatim:
+            return text
         first = text.strip().splitlines()[0] if text.strip() else ""
         return f"summary of: {first}"
 

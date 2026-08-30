@@ -13,6 +13,7 @@ import pytest
 from reel_vault.models import (
     ExtractedPost,
     MediaExtraction,
+    NoMatch,
     ProcessingStatus,
     Saved,
     SingleItemAnswer,
@@ -94,7 +95,7 @@ def test_content_only_spoken_in_the_video_becomes_findable(
     """The ceiling this whole feature exists to lift: a caption that says
     nothing, and content only the audio carries."""
     vault = _saved_vault(store)
-    assert vault.ask("journal").__class__.__name__ == "NoMatch"
+    assert isinstance(vault.ask("journal"), NoMatch)
 
     vault.attach_media(URL, MediaExtraction(transcript=TRANSCRIPT))
 
@@ -223,15 +224,34 @@ def test_undoing_a_move_keeps_the_transcript_too(store: InMemoryReelStore) -> No
     assert isinstance(vault.ask("wake"), SingleItemAnswer)
 
 
-def test_without_a_condenser_the_raw_text_stands_in_for_its_summary(
+def test_condensing_failing_keeps_the_words_without_claiming_to_have_read_them(
     store: InMemoryReelStore,
 ) -> None:
-    """Searching a whole transcript is worse than searching a tight summary,
-    and far better than losing the content."""
-    vault = _saved_vault(store)
+    """Falling back to the raw text as its own summary would put a whole
+    transcript into the embedding and drown out the caption and the shelf.
+    Keeping the raw text is what lets a later pass finish the job without
+    downloading the video again."""
+    vault = _saved_vault(store, condenser=FakeCondenser(raises=True))
 
     vault.attach_media(URL, MediaExtraction(transcript=TRANSCRIPT))
 
     saved = store.find_by_url(SAVED_URL)
     assert saved is not None
-    assert saved.transcript_summary == TRANSCRIPT
+    assert saved.transcript_raw == TRANSCRIPT
+    assert saved.transcript_summary == ""
+    assert saved.processing_status is ProcessingStatus.FAILED
+
+
+def test_content_only_shown_on_screen_becomes_findable(
+    store: InMemoryReelStore,
+) -> None:
+    """The frame half of the same ceiling: a creator who writes their whole
+    point onto the screen and says none of it aloud."""
+    vault = _saved_vault(store)
+    assert isinstance(vault.ask("shower"), NoMatch)
+
+    vault.attach_media(URL, MediaExtraction(frame_analysis="on screen: COLD SHOWER"))
+
+    answer = vault.ask("shower")
+    assert isinstance(answer, SingleItemAnswer)
+    assert answer.reel.url == SAVED_URL

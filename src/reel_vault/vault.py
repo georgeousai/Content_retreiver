@@ -87,12 +87,12 @@ class Vault:
         summarizer: Summarizer,
         comparer: Comparer,
         item_extractor: ItemExtractor,
-        # Optional because the vault is fully usable without them: a reel
+        condenser: ContentCondenser,
+        # Optional because the vault is fully usable without it: a reel
         # answers on its caption alone, exactly as it did before this
         # pipeline existed, and every test that is not about media should not
         # have to supply one.
         media_extractor: MediaExtractor | None = None,
-        condenser: ContentCondenser | None = None,
         match_threshold: float = DEFAULT_MATCH_THRESHOLD,
         top_k_single: int = DEFAULT_TOP_K_SINGLE,
         top_k_list: int = DEFAULT_TOP_K_LIST,
@@ -413,46 +413,51 @@ class Vault:
             self._store.update(failed)
             return failed
 
-        transcript_summary = self._condense(extraction.transcript)
-        frame_summary = self._condense(extraction.frame_analysis)
-        updated = replace(
+        try:
+            transcript_summary = self._condense(extraction.transcript)
+            frame_summary = self._condense(extraction.frame_analysis)
+        except Exception:
+            # Keep the words, drop the claim to have read them. The raw text
+            # is exactly what condensing needs, so a later pass can finish
+            # this reel without downloading the video again — which is the
+            # whole reason both halves are stored. Falling back to embedding
+            # the raw text instead would put a full transcript into the
+            # embedding and drown out the caption and the shelf it sits on.
+            logger.exception("Condensing failed for %s", normalized)
+            kept = replace(
+                existing,
+                transcript_raw=extraction.transcript,
+                frame_analysis_raw=extraction.frame_analysis,
+                processing_status=ProcessingStatus.FAILED,
+            )
+            self._store.update(kept)
+            return kept
+
+        read = replace(
             existing,
             transcript_raw=extraction.transcript,
             transcript_summary=transcript_summary,
             frame_analysis_raw=extraction.frame_analysis,
             frame_analysis_summary=frame_summary,
             processing_status=ProcessingStatus.DONE,
+        )
+        # Embedded from the reel as it now is, through the same one function
+        # a move uses. Spelling the parts out here instead would mean two
+        # places had to learn about every future embedded field — the drift
+        # that once let the URL matcher and the dedup key disagree.
+        updated = replace(
+            read,
             embedding=self._embedder.embed(
-                embedding_text(
-                    existing.caption,
-                    existing.tags,
-                    existing.collection,
-                    existing.subcollection,
-                    transcript_summary,
-                    frame_summary,
-                )
+                self._embedding_text_for(read, read.collection, read.subcollection)
             ),
         )
         self._store.update(updated)
         return updated
 
     def _condense(self, raw: str) -> str:
-        """The compact half of a piece of media text.
-
-        With no condenser wired in, the raw text stands in for its own
-        summary rather than the reel losing the content entirely — a vault
-        that can search a whole transcript is worse than one that searches a
-        tight summary, but far better than one that searches neither.
-        """
-        if not raw.strip():
-            return ""
-        if self._condenser is None:
-            return raw
-        try:
-            return self._condenser.condense(raw)
-        except Exception:
-            logger.exception("Condensing media text failed; keeping it uncondensed")
-            return raw
+        """The compact half of a piece of media text, and the only half that
+        is ever embedded."""
+        return self._condenser.condense(raw) if raw.strip() else ""
 
     def resume_pending_media(self) -> list[str]:
         """The reels whose video was never read, for the caller to schedule.

@@ -102,9 +102,6 @@ class SavedReel:
     processing_status: ProcessingStatus = ProcessingStatus.PENDING
     saved_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
-    def has_media(self) -> bool:
-        return bool(self.transcript_summary or self.frame_analysis_summary)
-
 
 @dataclass(frozen=True)
 class Saved:

@@ -83,13 +83,15 @@ class VideoMediaExtractor:
             if video is None:
                 return None
 
-            transcript = self._transcribe(video)
-            frame_text = self._read_frames(video)
+            extraction = MediaExtraction(
+                transcript=self._transcribe(video),
+                frame_analysis=self._read_frames(video),
+            )
 
-        if not transcript.strip() and not frame_text.strip():
+        if extraction.is_empty():
             logger.info("Nothing could be read from the video at %s", url)
             return None
-        return MediaExtraction(transcript=transcript, frame_analysis=frame_text)
+        return extraction
 
     def _download(self, url: str, into: Path) -> Path | None:
         try:
@@ -202,14 +204,16 @@ class SceneDetectFrameSampler:
             return [
                 encoded
                 for index in choose_frame_indexes(starts, total, max_frames)
-                for encoded in [_encode_frame(capture, index, cv2)]
+                for encoded in [_encode_frame(capture, index)]
                 if encoded is not None
             ]
         finally:
             capture.release()
 
 
-def _encode_frame(capture, index: int, cv2) -> bytes | None:
+def _encode_frame(capture, index: int) -> bytes | None:
+    import cv2
+
     capture.set(cv2.CAP_PROP_POS_FRAMES, index)
     read, frame = capture.read()
     if not read:

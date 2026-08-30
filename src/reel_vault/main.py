@@ -23,6 +23,7 @@ from reel_vault.adapters.groq_llm import (
     GroqTagger,
 )
 from reel_vault.adapters.media import (
+    FrameAnalyzer,
     SceneDetectFrameSampler,
     VideoMediaExtractor,
     YtDlpVideoDownloader,
@@ -71,8 +72,9 @@ def _build_media_extractor(config: Config, groq_client: Groq) -> MediaExtractor:
     larger half of what a video adds, and refusing to start the bot over a
     missing optional key would trade a working vault for a complete one.
     """
+    frame_analyzer: FrameAnalyzer
     if config.gemini_api_key:
-        frame_analyzer: object = GeminiFrameAnalyzer(config.gemini_api_key)
+        frame_analyzer = GeminiFrameAnalyzer(config.gemini_api_key)
     else:
         logger.warning(
             "GEMINI_API_KEY is not set — reels will be transcribed, but "
@@ -84,7 +86,7 @@ def _build_media_extractor(config: Config, groq_client: Groq) -> MediaExtractor:
         downloader=YtDlpVideoDownloader(),
         transcriber=GroqTranscriber(client=groq_client),
         frame_sampler=SceneDetectFrameSampler(),
-        frame_analyzer=frame_analyzer,  # type: ignore[arg-type]
+        frame_analyzer=frame_analyzer,
     )
 
 
