@@ -3,6 +3,7 @@ and relays their results as chat replies — no vault logic lives here."""
 
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 
@@ -27,6 +28,8 @@ from reel_vault.models import (
     UNCATEGORIZED,
     AggregateAnswer,
     AlreadySaved,
+    CompareAnswer,
+    ExtractAnswer,
     ExtractionFailed,
     ListAnswer,
     NeedsCollectionChoice,
@@ -47,6 +50,12 @@ from reel_vault.vault import Vault
 logger = logging.getLogger(__name__)
 
 NO_MATCH_REPLY = "Nothing in the vault matches that."
+# Distinct from NO_MATCH_REPLY: reels matched, they just did not contain the
+# thing that was asked for. Saying "nothing matches" there would send the user
+# looking for saves that are sitting right in front of them.
+NOTHING_TO_COMPILE_REPLY = (
+    "I found matching reels, but none of them list what you asked for."
+)
 
 # Callback actions. A reel travels through these as its shortcode rather
 # than its URL: Telegram allows 64 bytes for everything a callback carries,
@@ -86,6 +95,26 @@ def _render_summary(text: str) -> str:
         else:
             rendered.append(line)
     return "\n".join(rendered)
+
+
+def _render_comparison(answer: CompareAnswer) -> str:
+    """A ranked answer with the measure it used printed above it.
+
+    Shown rather than buried in the prose, because "best" is ambiguous often
+    enough that the criterion is the part most worth disagreeing with — and
+    the bot never asks which one the user meant, so seeing what it assumed is
+    the only way to correct it.
+    """
+    return (
+        f"<i>Ranked by: {_esc(answer.criterion)}</i>\n\n"
+        f"{_render_summary(answer.text)}"
+    )
+
+
+def _render_items(items: list[str]) -> str:
+    """The compiled list, as a list. The whole request was to be handed the
+    things themselves rather than a paragraph about them."""
+    return "\n".join(f"• {_esc(item)}" for item in items)
 
 
 def _move_keyboard(shortcode: str) -> InlineKeyboardMarkup:
@@ -241,7 +270,16 @@ class ReelVaultBot:
         self._vault = vault
         self._pending_manual_caption: dict[int, str] = {}
         self._pending_collection_choice: dict[int, NeedsCollectionChoice] = {}
-        self._app = Application.builder().token(token).build()
+        # Reels whose video is still to be read. A queue with one worker
+        # rather than a task per save: reading a video is a download plus a
+        # transcription plus a run of vision calls, all against free tiers
+        # that rate-limit, and twenty reels shared in a burst would otherwise
+        # start twenty downloads at once and fail most of them.
+        self._media_queue: asyncio.Queue[str] = asyncio.Queue()
+        self._media_worker: asyncio.Task[None] | None = None
+        self._app = (
+            Application.builder().token(token).post_init(self._on_start).build()
+        )
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_message)
         )
@@ -249,6 +287,42 @@ class ReelVaultBot:
 
     def run(self) -> None:
         self._app.run_polling()
+
+    async def _on_start(self, _app: Application) -> None:
+        """Start the media worker, and give it the work a previous run left.
+
+        The queue lives in this process and nothing else, so a restart in the
+        middle of reading a video would otherwise lose it permanently — and
+        invisibly, since a reel missing its transcript looks exactly like one
+        that never had a video worth reading. Nobody would find out until an
+        answer was quietly worse for it.
+        """
+        self._media_worker = asyncio.create_task(self._read_videos())
+        for url in self._vault.resume_pending_media():
+            self._queue_media(url)
+
+    def _queue_media(self, url: str) -> None:
+        self._media_queue.put_nowait(url)
+
+    async def _read_videos(self) -> None:
+        """One reel at a time, forever.
+
+        `to_thread` because the vault is synchronous and this work is long:
+        left on the event loop it would stall every other message for the
+        minutes a download and transcription take, which is the whole thing
+        this queue exists to avoid.
+        """
+        while True:
+            url = await self._media_queue.get()
+            try:
+                await asyncio.to_thread(self._vault.process_media, url)
+            except Exception:
+                # A failure here is one reel without a transcript. Letting it
+                # end the worker would be every later reel without one, with
+                # no sign anything had stopped.
+                logger.exception("Reading the video for %s failed", url)
+            finally:
+                self._media_queue.task_done()
 
     async def _on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message
@@ -323,6 +397,10 @@ class ReelVaultBot:
     async def _reply_to_save_result(self, message: Message, result: SaveResult) -> None:
         if isinstance(result, Saved):
             await self._confirm_save(message, result)
+            # Queued after the confirmation, never before it: the point of
+            # the queue is that sharing a reel stays as fast as it is today,
+            # and reading its video takes minutes.
+            self._queue_media(result.reel.url)
         elif isinstance(result, AlreadySaved):
             # Show the picture here too: recognizing the reel you just
             # re-shared is the same problem as recognizing one you searched for.
@@ -487,6 +565,19 @@ class ReelVaultBot:
             # watch what the answer was built from.
             await message.reply_text(
                 _render_summary(answer.text), parse_mode=ParseMode.HTML
+            )
+            await self._send_reel_cards(message, answer.reels)
+        elif isinstance(answer, CompareAnswer):
+            await message.reply_text(
+                _render_comparison(answer), parse_mode=ParseMode.HTML
+            )
+            await self._send_reel_cards(message, answer.reels)
+        elif isinstance(answer, ExtractAnswer):
+            if not answer.items:
+                await message.reply_text(NOTHING_TO_COMPILE_REPLY)
+                return
+            await message.reply_text(
+                _render_items(answer.items), parse_mode=ParseMode.HTML
             )
             await self._send_reel_cards(message, answer.reels)
         elif isinstance(answer, NoMatch):

@@ -9,6 +9,42 @@ from enum import Enum
 UNCATEGORIZED = "Uncategorized"
 
 
+class ProcessingStatus(Enum):
+    """Where a reel stands in the media pipeline (download → transcribe →
+    analyse frames).
+
+    The pipeline runs in the bot process and keeps nothing of its own, so a
+    restart mid-job would otherwise lose that work silently — a reel missing
+    its transcript looks exactly like a reel that never had one, and nobody
+    finds out until an answer is quietly worse for it. This column is the
+    whole durability mechanism: anything still PENDING at startup is picked
+    up again.
+    """
+
+    PENDING = "pending"
+    DONE = "done"
+    FAILED = "failed"
+    # Reels saved before the pipeline existed. Distinct from DONE, which
+    # claims the video was actually read, and from PENDING, which would queue
+    # every old reel for download the next time the bot starts.
+    SKIPPED = "skipped"
+
+
+@dataclass(frozen=True)
+class MediaExtraction:
+    """What a `MediaExtractor` recovers from a reel's video: the words spoken
+    in it, and what was shown on screen. Both are raw — condensing them is a
+    separate, swappable step, so that a summary judged poor later can be
+    remade from text the vault still holds rather than by re-downloading a
+    video whose URL may be long gone."""
+
+    transcript: str = ""
+    frame_analysis: str = ""
+
+    def is_empty(self) -> bool:
+        return not self.transcript.strip() and not self.frame_analysis.strip()
+
+
 @dataclass(frozen=True)
 class ExtractedPost:
     """What a `CaptionFetcher` recovers from a URL. Author and thumbnail fields
@@ -54,7 +90,20 @@ class SavedReel:
     # human placement is better evidence of where a library wants things than
     # a machine one, and is weighted accordingly when placing later reels.
     user_placed: bool = False
+    # What the video said and showed, kept twice over. The `_raw` halves are
+    # never embedded and never searched: they exist so a summary that turns
+    # out to be poor can be redone from the words themselves, instead of
+    # re-downloading a video whose source URL expires. The `_summary` halves
+    # are what retrieval and answers actually read.
+    transcript_raw: str = ""
+    transcript_summary: str = ""
+    frame_analysis_raw: str = ""
+    frame_analysis_summary: str = ""
+    processing_status: ProcessingStatus = ProcessingStatus.PENDING
     saved_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def has_media(self) -> bool:
+        return bool(self.transcript_summary or self.frame_analysis_summary)
 
 
 @dataclass(frozen=True)
@@ -145,14 +194,24 @@ class NeighbourPlacement:
 
 @dataclass(frozen=True)
 class SummarySource:
-    """One matched reel as the summarizer sees it. Deliberately narrower than
-    `SavedReel` — a summarizer needs the words and who wrote them, not the
-    embedding — and deliberately includes the author, without which no
-    "which creator said what" question can be answered at all."""
+    """One matched reel as an answer-writer sees it. Deliberately narrower
+    than `SavedReel` — the words and who wrote them, not the embedding — and
+    deliberately includes the author, without which no "which creator said
+    what" question can be answered at all.
+
+    `transcript` and `frame_text` are the condensed halves, never the raw
+    ones: a full transcript per reel would blow a multi-reel prompt's budget
+    on the reels nobody asked about. They are separate fields rather than
+    folded into `caption` so a prompt can say where a claim came from — a
+    creator's own written caption is a different kind of evidence from a
+    machine's reading of their video.
+    """
 
     caption: str
     author_handle: str | None = None
     author_name: str | None = None
+    transcript: str = ""
+    frame_text: str = ""
 
     @classmethod
     def of(cls, reel: SavedReel) -> SummarySource:
@@ -160,6 +219,8 @@ class SummarySource:
             caption=reel.caption,
             author_handle=reel.author_handle,
             author_name=reel.author_name,
+            transcript=reel.transcript_summary,
+            frame_text=reel.frame_analysis_summary,
         )
 
 
@@ -171,6 +232,15 @@ class QueryKind(Enum):
     LIST = "list"
     AGGREGATE = "aggregate"
     AUTHOR_FILTER = "author_filter"
+    # Both of these live inside what "aggregate" used to mean, and are pulled
+    # out because they are different jobs, not different phrasings of one.
+    # Ranking has to pick a winner and say by what measure; compiling has to
+    # pull one specific thing out of many reels and merge the duplicates. A
+    # single broadly-scoped prompt left to work out its own answer shape is
+    # what produced the summarizer hallucination already on record, so each
+    # gets told precisely what it is for instead.
+    COMPARE_RANK = "compare_rank"
+    EXTRACT_COMPILE = "extract_compile"
 
 
 @dataclass(frozen=True)
@@ -216,8 +286,55 @@ class AggregateAnswer:
 
 
 @dataclass(frozen=True)
+class Comparison:
+    """A ranked answer and the measure it was ranked by, as the comparer
+    produced them. The criterion travels with the text rather than being
+    buried inside it so the caller can be sure it was stated at all."""
+
+    text: str
+    criterion: str
+
+
+@dataclass(frozen=True)
+class CompareAnswer:
+    """One thing picked out of many, and the measure that picked it.
+
+    `criterion` is its own field because "best" almost never means one
+    obvious thing — best bicep workout could be most effective, quickest, or
+    least equipment — and an answer that hides which one it used cannot be
+    disagreed with. Stating it is what lets the user re-ask, and is why this
+    is not a clarifying question back: `ask` stays one stateless call."""
+
+    text: str
+    criterion: str
+    reels: list[SavedReel]
+
+
+@dataclass(frozen=True)
+class ExtractAnswer:
+    """The things asked for, pulled out of many reels and merged.
+
+    A list, not prose: someone asking for "all the interview questions across
+    my reels" wants the questions, and a paragraph describing them is work
+    handed back to the reader. Deliberately its own type rather than an
+    `AggregateAnswer` whose `text` happens to contain bullets, for the same
+    reason `ListAnswer` is: a shared shape with a sometimes-different meaning
+    is an invariant every caller has to remember."""
+
+    items: list[str]
+    reels: list[SavedReel]
+
+
+@dataclass(frozen=True)
 class NoMatch:
     query: str
 
 
-Answer = SingleItemAnswer | ListAnswer | AggregateAnswer | NoMatch
+Answer = (
+    SingleItemAnswer
+    | ListAnswer
+    | AggregateAnswer
+    | CompareAnswer
+    | ExtractAnswer
+    | NoMatch
+)

@@ -20,6 +20,7 @@ from groq import Groq
 from reel_vault.models import (
     UNCATEGORIZED,
     CollectionAssignment,
+    Comparison,
     NeighbourPlacement,
     QueryClassification,
     QueryKind,
@@ -29,6 +30,11 @@ from reel_vault.models import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "openai/gpt-oss-20b"
+
+# What a ranked answer says it ranked by when the model failed to say. Spelled
+# out rather than left empty: the answer is shown to the user, and a blank
+# would read as an unqualified verdict rather than a missing qualification.
+UNSTATED_CRITERION = "no stated measure"
 
 TAG_SYSTEM_PROMPT = (
     "You tag short social-media captions with topic keywords. Given a caption, "
@@ -57,17 +63,35 @@ identified by handle or name (e.g. "show me @gymshark's reels", "what have I \
 saved from Andrew Huberman"). Put the creator, without a leading @, in `author`.
 - "LIST" - the user wants to browse/see the saved items matching a topic, as a \
 list (e.g. "show me all my reels about AI", "what reels do I have on sourdough").
+- "COMPARE_RANK" - the user wants the best, the top few, or a comparison \
+between things their saved items describe (e.g. "what's the best bicep \
+workout", "which of these meal preps is quickest", "rank the note-taking apps \
+my reels mention").
+- "EXTRACT_COMPILE" - the user wants a specific kind of THING pulled out of \
+several saved items and gathered into one list (e.g. "give me all the \
+interview questions from my AI reels", "every tool mentioned in my \
+productivity reels", "compile the ingredients").
 - "AGGREGATE" - the user wants content gathered and synthesized ACROSS several \
-saved items into a written answer (e.g. "give me all the interview questions \
-from my AI reels", "summarize what my finance reels say about index funds").
+saved items into a written answer, without ranking it or listing one kind of \
+thing out of it (e.g. "summarize what my finance reels say about index \
+funds", "what do my reels say about morning routines").
 - "SINGLE" - the user is looking for one specific saved item (e.g. "find that \
 reel about transformer architecture").
 
-LIST vs AGGREGATE is the key distinction: LIST hands back the items themselves, \
-AGGREGATE reads them and writes an answer. `author` is null unless kind is \
-AUTHOR_FILTER. `collection` is independent of `kind`: "show me my Sales reels" \
-is LIST with collection "Sales"; "summarize my Sales reels" is AGGREGATE with \
-collection "Sales"."""
+The distinctions that matter:
+- LIST hands back the saved items themselves. Everything below reads them and \
+writes something new.
+- COMPARE_RANK has to pick a winner; AGGREGATE does not. If the request \
+contains "best", "top", "easiest", "most X", "better", or asks which one to \
+choose, it is COMPARE_RANK.
+- EXTRACT_COMPILE asks for instances of one kind of thing (questions, steps, \
+tools, names, prices) merged into a list; AGGREGATE asks what the items say. \
+"All the X from my Y reels" is EXTRACT_COMPILE, not AGGREGATE.
+
+`author` is null unless kind is AUTHOR_FILTER. `collection` is independent of \
+`kind`: "show me my Sales reels" is LIST with collection "Sales"; "summarize \
+my Sales reels" is AGGREGATE with collection "Sales"; "the best of my Sales \
+reels" is COMPARE_RANK with collection "Sales"."""
 
 SUMMARY_SYSTEM_PROMPT = """\
 You answer a user's question using ONLY the provided captions from their \
@@ -115,6 +139,94 @@ when the answer genuinely has sections; a short answer needs none.
 Write everything else as plain sentences. Do NOT use tables, pipes, asterisks, \
 underscores, backticks, or "#" for anything else - they reach the user \
 literally."""
+
+
+CONDENSE_SYSTEM_PROMPT = """\
+You compress a machine-made reading of a short social-media video - either a \
+transcript of what was said, or a description of what was on screen - down to \
+what someone searching their saved videos would need.
+
+Keep: every concrete claim, number, name, step, tool, price, and instruction. \
+Keep the specifics, which are the only reason anyone will ever find this \
+again.
+
+Drop: greetings, sign-offs, "follow for more", "comment X below", repetition, \
+filler, and stumbles. Drop anything that describes the video rather than \
+saying what is in it.
+
+Write plain sentences or short lines, no headings and no markup. Aim for a \
+tenth of the length, less if the video was mostly filler.
+
+Two rules that matter more than brevity:
+- Add NOTHING. Every fact in your output must be in the input. Do not \
+complete a half-finished thought, do not name the thing you think was being \
+described, and do not resolve an ambiguity by picking the likelier reading. \
+Example: given "so the first one is, you want to, yeah - just keep your \
+elbows in", write "keep your elbows in" - NOT "the first tip is to keep your \
+elbows tucked to isolate the bicep", which invents both a reason and a count \
+the speaker never gave.
+- If the input says nothing of substance - it is only a hook, a greeting, \
+music, or an unintelligible fragment - reply with an empty string rather \
+than manufacturing a summary of it."""
+
+COMPARE_SYSTEM_PROMPT = """\
+The user wants you to pick the best or the top few of something, out of what \
+their saved videos say. Reply with ONLY a JSON object: \
+{"criterion": "...", "answer": "..."}
+
+`criterion` is the measure you ranked by, as a short phrase ("fewest \
+ingredients", "most beginner-friendly", "strongest evidence given"). The \
+request is usually ambiguous - "best" can mean most effective, quickest, \
+cheapest, or easiest - so choose the reading the sources themselves best \
+support, and name it. You are NOT asking the user a question; you are \
+telling them which reading you used so they can re-ask if it was the wrong \
+one.
+
+`answer` is the ranked answer itself. Name the winner in the first sentence \
+and say what makes it win under your criterion. Where a runner-up is close \
+or wins under a different reading, say so briefly. Attribute inline as \
+"(@handle)".
+
+Rules:
+- Rank only on what the sources actually say. If none of them supports a \
+comparison on this question, say that plainly in `answer` instead of \
+inventing a ranking, and put the criterion you looked for in `criterion`.
+- Never credit a source with a claim it did not make, and never bridge a gap \
+because two things are topically adjacent. A source about morning habits is \
+not thereby advice on building a personal brand.
+- A source that does not address the question is not a contender. Leave it \
+out; do not rank it last to be thorough.
+- Say what you cannot know. If ranking properly would need something none of \
+the sources gives, name that gap in one clause rather than guessing past it.
+
+Formatting inside `answer`: plain sentences, and lines starting with "- " for \
+bullets. Nothing else - no tables, pipes, asterisks, underscores, backticks \
+or "#". They reach the user literally."""
+
+EXTRACT_SYSTEM_PROMPT = """\
+The user wants a specific kind of thing pulled out of their saved videos and \
+gathered into one list - the questions, the steps, the tools, the book \
+titles, whatever they named. Reply with ONLY a JSON array of strings.
+
+Each element is one item, written as the source gave it, trimmed to itself. \
+Return the items and nothing else: no headings, no numbering, no "here are \
+the items", no commentary elements.
+
+Rules:
+- Extract only items that are actually there. An empty array is the correct \
+answer when the sources do not contain the thing asked for - much better than \
+a plausible list nobody said.
+- Merge duplicates. The same item phrased two ways across two videos is ONE \
+element; keep the clearer wording.
+- Do not complete a partial item, and do not generalise a specific one into \
+the category you think it belongs to. Example: asked for interview questions, \
+a source saying "they'll ask about a time you disagreed with your manager" \
+yields "Tell me about a time you disagreed with your manager" - NOT "Conflict \
+resolution questions", which is a topic, not a question anyone asked.
+- Keep each item short enough to scan. If a source gives an item plus a long \
+justification, keep the item.
+- Preserve the order items appeared in where there is one (steps in a \
+recipe); otherwise most-mentioned first."""
 
 
 COLLECTION_SYSTEM_PROMPT = (
@@ -225,11 +337,45 @@ class GroqCollectionAssigner(_GroqChatAdapter):
 
 class GroqSummarizer(_GroqChatAdapter):
     def summarize(self, query: str, sources: list[SummarySource]) -> str:
-        captions_block = "\n\n".join(_format_source(source) for source in sources)
-        user_content = f"Question: {query}\n\nCaptions:\n{captions_block}"
         return self._complete(
-            system_prompt=SUMMARY_SYSTEM_PROMPT, user_content=user_content, temperature=0.3
+            system_prompt=SUMMARY_SYSTEM_PROMPT,
+            user_content=_question_with_sources(query, sources),
+            temperature=0.3,
         )
+
+
+class GroqComparer(_GroqChatAdapter):
+    def compare(self, query: str, sources: list[SummarySource]) -> Comparison:
+        content = self._complete(
+            system_prompt=COMPARE_SYSTEM_PROMPT,
+            user_content=_question_with_sources(query, sources),
+            # Ranking is a judgement that should not change between two
+            # identical askings of the same question.
+            temperature=0.0,
+        )
+        return _parse_comparison(content)
+
+
+class GroqItemExtractor(_GroqChatAdapter):
+    def extract_items(self, query: str, sources: list[SummarySource]) -> list[str]:
+        content = self._complete(
+            system_prompt=EXTRACT_SYSTEM_PROMPT,
+            user_content=_question_with_sources(query, sources),
+            temperature=0.0,
+        )
+        return _parse_items(content)
+
+
+class GroqContentCondenser(_GroqChatAdapter):
+    def condense(self, text: str) -> str:
+        return self._complete(
+            system_prompt=CONDENSE_SYSTEM_PROMPT,
+            user_content=text,
+            # Nothing here is a judgement call: the job is to drop filler and
+            # keep specifics, and variation between runs is only a chance to
+            # drop a different fact.
+            temperature=0.0,
+        ).strip()
 
 
 def _format_neighbours(neighbours: list[NeighbourPlacement]) -> str:
@@ -255,15 +401,38 @@ def _format_neighbours(neighbours: list[NeighbourPlacement]) -> str:
     return "\n".join(lines)
 
 
+def _question_with_sources(query: str, sources: list[SummarySource]) -> str:
+    """The one user message all three answer-writers share. They differ in
+    what they are told to do with the sources, never in how the sources are
+    presented — one shape means a prompt fix for one of them is a prompt fix
+    for all three."""
+    block = "\n\n".join(_format_source(source) for source in sources)
+    return f"Question: {query}\n\nSaved videos:\n{block}"
+
+
 def _format_source(source: SummarySource) -> str:
-    """Label each caption with its creator, so the model can attribute. An
-    unknown creator is said to be unknown rather than left blank, which the
-    model could otherwise read as the previous caption's author."""
+    """One reel as the answer-writers see it: who made it, what they wrote,
+    and — where the video has been read — what was said and shown in it.
+
+    The three are labelled separately rather than run together. A creator's
+    own caption and a machine's reading of their video are different kinds of
+    evidence, and a transcript in particular is an imperfect hearing: leaving
+    the model unable to tell them apart would let a transcription error be
+    reported as something the creator wrote down. An unknown creator is said
+    to be unknown rather than left blank, which the model could otherwise
+    read as the previous source's author.
+    """
     if source.author_handle and source.author_name:
         who = f"{source.author_name} (@{source.author_handle})"
     else:
         who = source.author_handle or source.author_name or "unknown creator"
-    return f"- [by {who}] {source.caption}"
+
+    lines = [f"- [by {who}] caption: {source.caption}"]
+    if source.transcript:
+        lines.append(f"  spoken in the video: {source.transcript}")
+    if source.frame_text:
+        lines.append(f"  shown on screen: {source.frame_text}")
+    return "\n".join(lines)
 
 
 def _loads_json(content: str) -> object | None:
@@ -370,6 +539,46 @@ def _canonicalize(name: str, existing: Iterable[str]) -> str:
         if candidate.casefold() == name.casefold():
             return candidate
     return name
+
+
+def _parse_comparison(content: str) -> Comparison:
+    """Parse the comparer's JSON.
+
+    An unparseable reply still has to name a criterion: `CompareAnswer`
+    promises the user that the measure used was stated, and a silently blank
+    one would turn a parse failure into an answer that looks unqualified.
+    """
+    parsed = _loads_json(content)
+    if not isinstance(parsed, dict):
+        logger.warning("Comparer returned non-JSON content: %r", content)
+        return Comparison(text=content.strip(), criterion=UNSTATED_CRITERION)
+
+    text = str(parsed.get("answer") or "").strip()
+    criterion = str(parsed.get("criterion") or "").strip() or UNSTATED_CRITERION
+    if not text:
+        logger.warning("Comparer returned no answer: %r", content)
+        return Comparison(text=content.strip(), criterion=criterion)
+    return Comparison(text=text, criterion=criterion)
+
+
+def _parse_items(content: str) -> list[str]:
+    """Parse the extractor's JSON array, dropping duplicates it left in.
+
+    Merging duplicates is the model's job and it is told so, but a compiled
+    list is precisely where a repeat is most visible, so the same guarantee
+    is enforced here rather than trusted.
+    """
+    parsed = _loads_json(content)
+    if not isinstance(parsed, list):
+        logger.warning("Item extractor returned non-JSON content: %r", content)
+        return []
+
+    seen: dict[str, str] = {}
+    for item in parsed:
+        text = str(item).strip()
+        if text:
+            seen.setdefault(text.casefold(), text)
+    return list(seen.values())
 
 
 def _parse_tag_list(content: str) -> list[str]:

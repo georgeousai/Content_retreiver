@@ -11,9 +11,12 @@ from dataclasses import replace
 
 from reel_vault.models import (
     CollectionAssignment,
+    Comparison,
     Correction,
     ExtractedPost,
+    MediaExtraction,
     NeighbourPlacement,
+    ProcessingStatus,
     QueryClassification,
     QueryKind,
     SavedReel,
@@ -177,6 +180,13 @@ class InMemoryReelStore:
         if reel is not None:
             self._by_url[normalized_url] = replace(reel, thumbnail_ref=thumbnail_ref)
 
+    def find_awaiting_media(self) -> list[SavedReel]:
+        return [
+            reel
+            for reel in self._by_url.values()
+            if reel.processing_status is ProcessingStatus.PENDING
+        ]
+
     def find_by_collection(self, collection: str) -> list[SavedReel]:
         return [
             reel
@@ -249,10 +259,14 @@ class FakeQueryIntent:
         aggregate_triggers: tuple[str, ...] = ("give me all", "summarize", "every"),
         list_triggers: tuple[str, ...] = ("show me", "list ", "browse"),
         classifications: Mapping[str, QueryClassification] | None = None,
+        compare_triggers: tuple[str, ...] = ("best ", "which is better", "rank"),
+        extract_triggers: tuple[str, ...] = ("compile", "full list of"),
     ) -> None:
         self._aggregate_triggers = aggregate_triggers
         self._list_triggers = list_triggers
         self._classifications = classifications or {}
+        self._compare_triggers = compare_triggers
+        self._extract_triggers = extract_triggers
 
     def classify(self, query: str, collections: list[str]) -> QueryClassification:
         if query in self._classifications:
@@ -271,6 +285,15 @@ class FakeQueryIntent:
         named = next(
             (name for name in collections if name.casefold() in lowered), None
         )
+        # Checked before the broader aggregate/list phrasings, which a real
+        # ranking or compiling request tends to contain as well ("give me the
+        # full list of ...", "show me the best ...").
+        if any(trigger in lowered for trigger in self._compare_triggers):
+            return QueryClassification(kind=QueryKind.COMPARE_RANK, collection=named)
+        if any(trigger in lowered for trigger in self._extract_triggers):
+            return QueryClassification(
+                kind=QueryKind.EXTRACT_COMPILE, collection=named
+            )
         if any(trigger in lowered for trigger in self._list_triggers):
             return QueryClassification(kind=QueryKind.LIST, collection=named)
         if any(trigger in lowered for trigger in self._aggregate_triggers):
@@ -293,6 +316,82 @@ class FakeSummarizer:
             f"{source.caption} (by {source.author_handle or 'unknown'})"
             for source in sources
         )
+
+
+class FakeComparer:
+    """Ranks by whichever source has the most text to go on, and says so.
+    Deterministic, and records its calls so a test can check the summarizer
+    was never the one asked."""
+
+    def __init__(self, criterion: str = "amount said about it") -> None:
+        self._criterion = criterion
+        self.calls: list[tuple[str, list[SummarySource]]] = []
+
+    def compare(self, query: str, sources: list[SummarySource]) -> Comparison:
+        self.calls.append((query, list(sources)))
+        best = max(sources, key=lambda source: len(_all_text(source)), default=None)
+        winner = best.caption if best is not None else "nothing"
+        return Comparison(
+            text=f"Best for {query}: {winner}", criterion=self._criterion
+        )
+
+
+class FakeItemExtractor:
+    """Splits every source's text on newlines into items, deduplicated across
+    reels while preserving order — a crude stand-in for the real extraction,
+    but enough to exercise that duplicates across reels collapse."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, list[SummarySource]]] = []
+
+    def extract_items(self, query: str, sources: list[SummarySource]) -> list[str]:
+        self.calls.append((query, list(sources)))
+        items: dict[str, None] = {}
+        for source in sources:
+            for line in _all_text(source).splitlines():
+                if line.strip():
+                    items.setdefault(line.strip(), None)
+        return list(items)
+
+
+class FakeMediaExtractor:
+    """Maps URL -> MediaExtraction. A missing entry means nothing could be
+    recovered from the video; an entry that is an exception is raised, so a
+    test can check a failing extractor does not escape into the caller."""
+
+    def __init__(
+        self, extractions: Mapping[str, MediaExtraction | Exception | None] | None = None
+    ) -> None:
+        self._extractions = extractions or {}
+        self.calls: list[str] = []
+
+    def extract(self, url: str) -> MediaExtraction | None:
+        self.calls.append(url)
+        found = self._extractions.get(url)
+        if isinstance(found, Exception):
+            raise found
+        return found
+
+
+class FakeCondenser:
+    """Condenses by keeping the first line, which is enough to tell a summary
+    apart from the raw text it came from."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def condense(self, text: str) -> str:
+        self.calls.append(text)
+        first = text.strip().splitlines()[0] if text.strip() else ""
+        return f"summary of: {first}"
+
+
+def _all_text(source: SummarySource) -> str:
+    """Everything a source carries, caption and video alike — what an answer
+    writer actually has to work from."""
+    return "\n".join(
+        part for part in (source.caption, source.transcript, source.frame_text) if part
+    )
 
 
 def _cosine(a: list[float], b: list[float]) -> float:

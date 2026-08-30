@@ -56,8 +56,11 @@ def embedding_text(
     tags: list[str],
     collection: str,
     subcollection: str | None,
+    transcript_summary: str = "",
+    frame_analysis_summary: str = "",
 ) -> str:
-    """The text a reel is embedded as — its curated metadata, then its caption.
+    """The text a reel is embedded as — its curated metadata, its caption, and
+    what its video turned out to say and show.
 
     Caption alone is too thin a signal to retrieve on. A reel filed under
     "Product Management > Interviews", tagged "case prep", scored 0.330
@@ -67,8 +70,23 @@ def embedding_text(
     Personal Growth > Journey and would otherwise be findable by neither
     word), so it is embedded alongside the caption rather than left to one
     side.
+
+    The media summaries join the same text rather than getting an arm of
+    their own. They are free prose like the caption, best matched by meaning,
+    and folding them in is what finally makes a comment-bait reel — "comment
+    HABITS for my list", nearly half the live vault — findable by what the
+    creator actually said out loud. Only the condensed halves belong here:
+    embedding a full transcript would swamp the caption and the shelf it sits
+    on, and the raw text is kept for regenerating a summary, not for search.
     """
-    parts = (collection, subcollection or "", " ".join(tags), caption)
+    parts = (
+        collection,
+        subcollection or "",
+        " ".join(tags),
+        caption,
+        transcript_summary,
+        frame_analysis_summary,
+    )
     return " | ".join(part.strip() for part in parts if part.strip())
 
 

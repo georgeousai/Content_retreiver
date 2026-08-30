@@ -14,6 +14,7 @@ from reel_vault.models import (
     UNCATEGORIZED,
     Correction,
     NeighbourPlacement,
+    ProcessingStatus,
     SavedReel,
 )
 from reel_vault.search import keyword_score, merge_hits, metadata_text
@@ -54,7 +55,27 @@ ALTER TABLE saved_reels
     -- like this one?" without favouring whichever shelf shares the
     -- caption's vocabulary.
     ADD COLUMN IF NOT EXISTS caption_embedding VECTOR(384),
-    ADD COLUMN IF NOT EXISTS user_placed BOOLEAN NOT NULL DEFAULT FALSE;
+    ADD COLUMN IF NOT EXISTS user_placed BOOLEAN NOT NULL DEFAULT FALSE,
+    -- What the video said and showed. The `_raw` halves are never embedded
+    -- and never searched; they exist so a summary judged poor later can be
+    -- remade from the words themselves, rather than by re-downloading a
+    -- video whose source URL has since expired.
+    ADD COLUMN IF NOT EXISTS transcript_raw TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS transcript_summary TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS frame_analysis_raw TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS frame_analysis_summary TEXT NOT NULL DEFAULT '',
+    -- Deliberately defaulted to 'skipped', not 'pending': rows already in the
+    -- vault when this column arrived predate the pipeline, and defaulting
+    -- them to pending would queue every one of them for download the next
+    -- time the bot starts. Backfilling them is a separate, deliberate job.
+    -- The default flips to 'pending' immediately below, for rows written
+    -- from here on.
+    ADD COLUMN IF NOT EXISTS processing_status TEXT NOT NULL DEFAULT 'skipped';
+
+ALTER TABLE saved_reels ALTER COLUMN processing_status SET DEFAULT 'pending';
+
+CREATE INDEX IF NOT EXISTS saved_reels_pending_idx
+    ON saved_reels (processing_status) WHERE processing_status = 'pending';
 
 CREATE INDEX IF NOT EXISTS saved_reels_collection_idx
     ON saved_reels (collection, subcollection);
@@ -83,7 +104,8 @@ CREATE INDEX IF NOT EXISTS reel_corrections_url_idx
 COLUMNS = (
     "normalized_url, caption, tags, embedding, caption_embedding, collection, "
     "subcollection, author_handle, author_name, thumbnail_ref, user_placed, "
-    "saved_at"
+    "transcript_raw, transcript_summary, frame_analysis_raw, "
+    "frame_analysis_summary, processing_status, saved_at"
 )
 
 
@@ -118,7 +140,8 @@ class PostgresReelStore:
     def save(self, reel: SavedReel) -> bool:
         cursor = self._conn.execute(
             f"INSERT INTO saved_reels ({COLUMNS}, metadata_text) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+            "%s, %s, %s, %s) "
             "ON CONFLICT (normalized_url) DO NOTHING",
             (
                 reel.url,
@@ -132,6 +155,11 @@ class PostgresReelStore:
                 reel.author_name,
                 reel.thumbnail_ref,
                 reel.user_placed,
+                reel.transcript_raw,
+                reel.transcript_summary,
+                reel.frame_analysis_raw,
+                reel.frame_analysis_summary,
+                reel.processing_status.value,
                 reel.saved_at,
                 metadata_text(reel.tags, reel.collection, reel.subcollection),
             ),
@@ -140,9 +168,19 @@ class PostgresReelStore:
         return cursor.rowcount > 0
 
     def update(self, reel: SavedReel) -> None:
+        """Everything about a saved reel that can change after the save.
+
+        The media columns travel with the embedding rather than in a setter
+        of their own: a transcript written without re-embedding would be
+        words the vault holds and no query can reach, and separating the two
+        writes would make that an easy mistake to make twice.
+        """
         self._conn.execute(
             "UPDATE saved_reels SET collection = %s, subcollection = %s, "
-            "embedding = %s, metadata_text = %s, user_placed = %s "
+            "embedding = %s, metadata_text = %s, user_placed = %s, "
+            "transcript_raw = %s, transcript_summary = %s, "
+            "frame_analysis_raw = %s, frame_analysis_summary = %s, "
+            "processing_status = %s "
             "WHERE normalized_url = %s",
             (
                 reel.collection,
@@ -150,9 +188,22 @@ class PostgresReelStore:
                 Vector(reel.embedding),
                 metadata_text(reel.tags, reel.collection, reel.subcollection),
                 reel.user_placed,
+                reel.transcript_raw,
+                reel.transcript_summary,
+                reel.frame_analysis_raw,
+                reel.frame_analysis_summary,
+                reel.processing_status.value,
                 reel.url,
             ),
         )
+
+    def find_awaiting_media(self) -> list[SavedReel]:
+        rows = self._conn.execute(
+            f"SELECT {COLUMNS} FROM saved_reels "
+            "WHERE processing_status = %s ORDER BY saved_at",
+            (ProcessingStatus.PENDING.value,),
+        ).fetchall()
+        return [_to_reel(row) for row in rows]
 
     def find_similar_captions(
         self, caption_embedding: list[float], limit: int
@@ -326,6 +377,11 @@ def _to_reel(row: tuple) -> SavedReel:
         author_name,
         thumbnail_ref,
         user_placed,
+        transcript_raw,
+        transcript_summary,
+        frame_analysis_raw,
+        frame_analysis_summary,
+        processing_status,
         saved_at,
     ) = row
     saved_at = saved_at if saved_at.tzinfo else saved_at.replace(tzinfo=timezone.utc)
@@ -343,8 +399,25 @@ def _to_reel(row: tuple) -> SavedReel:
         author_name=author_name,
         thumbnail_ref=thumbnail_ref,
         user_placed=user_placed,
+        transcript_raw=transcript_raw or "",
+        transcript_summary=transcript_summary or "",
+        frame_analysis_raw=frame_analysis_raw or "",
+        frame_analysis_summary=frame_analysis_summary or "",
+        processing_status=_to_status(processing_status),
         saved_at=saved_at,
     )
+
+
+def _to_status(value: str | None) -> ProcessingStatus:
+    """A status the code does not recognize is read as SKIPPED rather than
+    raising: an unknown value is a reel this build does not know how to
+    process, and refusing to load the row at all would take down every query
+    that happened to match it."""
+    try:
+        return ProcessingStatus(value)
+    except ValueError:
+        logger.warning("Unknown processing_status %r; treating as skipped", value)
+        return ProcessingStatus.SKIPPED
 
 
 def _to_float_list(embedding: Vector | Iterable[float]) -> list[float]:

@@ -57,13 +57,15 @@ flowchart LR
 
 **Asking.** You type a question into the same chat and — this is the interesting part — the LLM decides *what kind* of question you asked, in one classification call. Looking for one specific reel? You get it, with its picture. Want to browse everything on a topic? You get the list, with pictures to recognize them by. Want something pulled together across a topic? You get a synthesized answer built only from the captions that actually matched, plus the reels it was built from, so you can go watch them. Asking for one creator's reels (`show me @gymshark's reels`) skips semantic search entirely and filters by author — "everything from X" is an identity question, not a similarity one. You never pick a mode; it works out which you meant.
 
-**What the answers can and can't know.** Synthesized answers are told who posted each caption, so "which creator said what" works — but only for content actually written in the caption. A reel whose substance is *spoken* in the video is invisible to the vault until audio transcription exists (see Roadmap).
+**What the answers can and can't know.** Answers are told who posted each reel, so "which creator said what" works. They now also read what the video *said* and *showed*: after a save, the reel's video is downloaded in the background, its audio transcribed, and frames sampled at scene changes and read for on-screen text. That is what lifts the ceiling this vault used to have — 46% of a real vault's captions were comment-bait (`"comment HABITS for my list"`) whose actual content was spoken aloud and written down nowhere.
+
+**Two more shapes of question.** Beyond finding one reel, browsing a list, filtering by creator, and synthesizing across many, the vault answers *comparisons* ("what's the best bicep workout" — it picks a winner and prints the measure it ranked by, because "best" is ambiguous and a hidden criterion can't be argued with) and *compilations* ("give me every interview question across my reels" — a real deduplicated list, not a paragraph about one).
 
 ---
 
 ## Status
 
-**v1 is built and working end-to-end against real services**, with 69 tests passing and a clean `mypy` run.
+**Built and working end-to-end against real services**, with 187 tests passing and a clean `mypy` run.
 
 | # | Capability | Status |
 |---|---|---|
@@ -82,7 +84,18 @@ Since then, a second slice ([`.scratch/reel-vault-query-answering/`](.scratch/re
 | 04 | Automatic thumbnail capture — the save confirmation itself mints a non-expiring Telegram `file_id` | ✅ Done |
 | 05 | Thumbnails rendered in single, list, and aggregate replies | ✅ Done |
 
-**Deliberately not in v1:** LinkedIn and blog sources, audio transcription, on-screen text (OCR), video downloads, multi-user accounts, a web UI, and cloud hosting. The architecture is built so these are *additive* rather than rewrites — see [the roadmap](#where-this-is-going).
+A third slice ([`.scratch/reel-vault-media-pipeline/`](.scratch/reel-vault-media-pipeline/)) gave the vault access to the video itself:
+
+| # | Capability | Status |
+|---|---|---|
+| 01 | Media columns, condensing, and re-embedding a reel around what its video said | ✅ Done |
+| 02 | Real video download, with the file guaranteed deleted afterwards | ✅ Done |
+| 03 | Audio transcription via Groq Whisper | ✅ Done |
+| 04 | Scene-detected frame sampling and on-screen text reading via Gemini Flash | ✅ Done |
+| 05 | Background processing after save, resumed after a restart | ✅ Done |
+| 06 | Compare/rank and extract/compile query kinds | ✅ Done |
+
+**Deliberately not built yet:** LinkedIn, TikTok and YouTube Shorts sources, multi-user accounts, a web UI, and cloud hosting. The architecture is built so these are *additive* rather than rewrites — see [the roadmap](#where-this-is-going).
 
 ---
 
@@ -112,14 +125,17 @@ This buys two concrete things:
 
 **Tests run in milliseconds with no network.** The seam is exercised with fake adapters — a canned caption fetcher, a deterministic tagger, a bag-of-words embedder, an in-memory store. No test spins up a bot, calls Groq, or touches a database.
 
-**New sources are new adapters, not surgery.** Adding LinkedIn means writing a caption fetcher. Adding audio transcription means extending the extraction chain. Neither touches `save_reel`'s contract.
+**New sources are new adapters, not surgery.** Adding LinkedIn means writing a caption fetcher. Transcription and frame reading arrived the same way — as `MediaExtractor` and `ContentCondenser` adapters behind the existing seam. Neither touched `save_reel`'s contract.
 
 ### The stack
 
 | Concern | Choice | Why |
 |---|---|---|
 | Intake | Telegram bot, long-polling | Native share-sheet target; no webhook or public endpoint needed |
-| Caption extraction | Instagram oEmbed → `yt-dlp` fallback | Caption text only — no video or audio is ever downloaded |
+| Caption extraction | Instagram oEmbed → `yt-dlp` fallback | Caption text only, so a save stays fast |
+| Transcription | Groq Whisper (`whisper-large-v3-turbo`), free tier | The mp4 goes straight up — no ffmpeg between a save and its transcript |
+| Frame reading | Scene detection (PySceneDetect + OpenCV) → Gemini Flash | Cuts are where the picture actually changes; a fixed timer misses a card that flashes by |
+| Video files | Downloaded to a temp dir, deleted after reading | Disk never grows with the vault — the "no stored media" rule holds |
 | Tagging & synthesis | Groq free tier (`openai/gpt-oss-20b`) | Open-weight model, no per-reel cost |
 | Embeddings | `all-MiniLM-L6-v2` via `sentence-transformers` | 384-dim, runs locally on CPU, zero API calls |
 | Storage | Postgres + `pgvector` | One row per reel; cosine similarity search in the database |
@@ -158,13 +174,16 @@ The app creates the `vector` extension and the `saved_reels` table itself on fir
 cp .env.example .env
 ```
 
-Fill in all three values:
+Fill in the three required values, and optionally a Gemini key:
 
 ```ini
 TELEGRAM_BOT_TOKEN=your-token-from-botfather
 GROQ_API_KEY=your-groq-key
 DATABASE_URL=postgresql://postgres:reelvault@localhost:5434/reel_vault
+GEMINI_API_KEY=your-gemini-key
 ```
+
+`GEMINI_API_KEY` is optional. Without it reels are still downloaded and transcribed; only the reading of on-screen text is off, and the bot says so at startup rather than refusing to run.
 
 `.env` is gitignored — your credentials stay local.
 
@@ -220,11 +239,11 @@ Two things that will bite eventually, documented so they don't cost you an after
 
 ## Where this is going
 
-v1 proves the concept on a deliberately narrow slice: Instagram only, captions only, Telegram only, one user. The seam design exists so each of the following is an added adapter rather than a rewrite.
+The vault now reads what a reel says and shows, not only what its caption wrote. What remains narrow: Instagram only, Telegram only, one user. The seam design exists so each of the following is an added adapter rather than a rewrite.
 
 **More sources.** LinkedIn posts and blog links become additional caption fetchers. `save_reel` doesn't change — it never knew what Instagram was.
 
-**Deeper extraction.** Plenty of reels carry their real content in the audio or in on-screen text, not the caption. Audio transcription (Whisper) and OCR slot into the extraction chain, feeding the same tagging and embedding path. This is the single biggest quality upgrade available — it would take the vault from *"what the creator wrote"* to *"what the reel actually says."*
+**More platforms.** TikTok, YouTube Shorts and LinkedIn, deliberately sequenced *after* the media pipeline rather than alongside it: what is platform-specific is only URL parsing and extraction, and every bug in the shared core would otherwise be inherited by each new platform the moment it was added.
 
 **A real UI.** Telegram is a great intake channel and a mediocre browsing one. A web interface over the same vault would add topic browsing, a tag cloud, filtering by date, and reading a synthesized answer alongside the reels it came from.
 

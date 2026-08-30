@@ -9,8 +9,10 @@ from typing import Protocol
 
 from reel_vault.models import (
     CollectionAssignment,
+    Comparison,
     Correction,
     ExtractedPost,
+    MediaExtraction,
     NeighbourPlacement,
     QueryClassification,
     SavedReel,
@@ -21,6 +23,38 @@ from reel_vault.models import (
 class CaptionFetcher(Protocol):
     def fetch(self, url: str) -> ExtractedPost | None:
         """Return the post's caption and author, or None if not extractable."""
+        ...
+
+
+class MediaExtractor(Protocol):
+    def extract(self, url: str) -> MediaExtraction | None:
+        """Everything the reel's video itself carries: what is said in it, and
+        what is shown on screen. None when nothing could be recovered.
+
+        One port for the whole job rather than one per step, mirroring how
+        `CaptionFetcher` already hides oEmbed-then-scraper behind a single
+        call: downloading, transcribing and reading frames share a video file
+        that must not outlive them, so splitting them across ports would push
+        that file's lifetime out into the caller.
+
+        Returns None rather than raising. A reel is already saved and usable
+        by the time this runs; failing to read its video is a smaller loss
+        than an exception escaping into a background task.
+        """
+        ...
+
+
+class ContentCondenser(Protocol):
+    def condense(self, text: str) -> str:
+        """Compact a transcript or a frame reading down to what is worth
+        retrieving on.
+
+        The long version is kept too, so this is allowed to be lossy — but
+        not free to invent. It runs unattended on every reel, and unlike a
+        caption there is no short source text sitting in front of the user to
+        catch it against, which makes a confident wrong summary here harder
+        to notice than the one already on record.
+        """
         ...
 
 
@@ -93,6 +127,10 @@ class ReelStore(Protocol):
         Re-filing is not a taxonomy-only edit: a reel is embedded and indexed
         together with the collection it sits on, so moving it between shelves
         has to rewrite what it is findable by, not just what it is labelled.
+        The same is true of media: a transcript that arrived after the save
+        changes what the reel is findable by, so this writes the media
+        columns and the embedding together rather than leaving a reel
+        carrying words no query can reach.
         """
         ...
 
@@ -109,6 +147,16 @@ class ReelStore(Protocol):
         """Every reel by one creator, matched against handle or display name.
         A plain filter — no embedding, no ranking: "everything from X" is an
         identity question, not a similarity one."""
+        ...
+
+    def find_awaiting_media(self) -> list[SavedReel]:
+        """Every reel whose video has not been read yet.
+
+        The background pipeline holds its queue only in memory, so this is
+        what a restart reads to find the work it dropped. Reels already read,
+        already failed, or saved before the pipeline existed are not here —
+        an old reel is not the same thing as an interrupted one.
+        """
         ...
 
     def find_by_collection(self, collection: str) -> list[SavedReel]:
@@ -149,6 +197,34 @@ class QueryIntent(Protocol):
 class Summarizer(Protocol):
     def summarize(self, query: str, sources: list[SummarySource]) -> str:
         """Synthesize an answer from the matched reels. Sources carry their
-        author so the answer can attribute across creators — but only ever
-        from what the captions themselves say."""
+        author so the answer can attribute across creators — and, where the
+        video has been read, what was said and shown in it as well as what
+        the caption wrote."""
+        ...
+
+
+class Comparer(Protocol):
+    def compare(self, query: str, sources: list[SummarySource]) -> Comparison:
+        """Rank the matched reels against what the user asked for and pick a
+        winner, naming the measure used.
+
+        A sibling of `Summarizer` rather than a mode of it: the two produce
+        different answers and need different instructions, and the failure
+        already on record came from one prompt being left to work out its own
+        shape. Naming the criterion is not optional — "best" is ambiguous
+        often enough that an unstated measure is an answer the user cannot
+        argue with.
+        """
+        ...
+
+
+class ItemExtractor(Protocol):
+    def extract_items(self, query: str, sources: list[SummarySource]) -> list[str]:
+        """Pull the specific things the user asked for out of the matched
+        reels, merged and deduplicated across them.
+
+        Returns the items themselves, not prose about them: the whole point
+        of the request is to be handed a list, and a paragraph would hand the
+        assembling work back to the reader.
+        """
         ...

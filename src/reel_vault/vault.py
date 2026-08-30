@@ -16,12 +16,16 @@ from reel_vault.models import (
     AggregateAnswer,
     AlreadySaved,
     Answer,
+    CompareAnswer,
     Correction,
+    ExtractAnswer,
     ExtractedPost,
     ExtractionFailed,
     ListAnswer,
+    MediaExtraction,
     NeedsCollectionChoice,
     NoMatch,
+    ProcessingStatus,
     QueryClassification,
     QueryKind,
     Saved,
@@ -33,7 +37,11 @@ from reel_vault.models import (
 from reel_vault.ports import (
     CaptionFetcher,
     CollectionAssigner,
+    Comparer,
+    ContentCondenser,
     Embedder,
+    ItemExtractor,
+    MediaExtractor,
     QueryIntent,
     ReelStore,
     Summarizer,
@@ -77,6 +85,14 @@ class Vault:
         store: ReelStore,
         query_intent: QueryIntent,
         summarizer: Summarizer,
+        comparer: Comparer,
+        item_extractor: ItemExtractor,
+        # Optional because the vault is fully usable without them: a reel
+        # answers on its caption alone, exactly as it did before this
+        # pipeline existed, and every test that is not about media should not
+        # have to supply one.
+        media_extractor: MediaExtractor | None = None,
+        condenser: ContentCondenser | None = None,
         match_threshold: float = DEFAULT_MATCH_THRESHOLD,
         top_k_single: int = DEFAULT_TOP_K_SINGLE,
         top_k_list: int = DEFAULT_TOP_K_LIST,
@@ -91,6 +107,10 @@ class Vault:
         self._store = store
         self._query_intent = query_intent
         self._summarizer = summarizer
+        self._comparer = comparer
+        self._item_extractor = item_extractor
+        self._media_extractor = media_extractor
+        self._condenser = condenser
         self._match_threshold = match_threshold
         self._neighbour_count = neighbour_count
         self._neighbour_floor = neighbour_floor
@@ -101,6 +121,10 @@ class Vault:
             # Author queries are a plain filter, not a similarity search, so
             # this bounds the rows handed back rather than the search itself.
             QueryKind.AUTHOR_FILTER: top_k_list,
+            # Both read every match into one prompt, like AGGREGATE, so the
+            # free-tier budget bounds them the same way.
+            QueryKind.COMPARE_RANK: top_k_aggregate,
+            QueryKind.EXTRACT_COMPILE: top_k_aggregate,
         }
 
     def save_reel(self, url: str, *, manual_caption: str | None = None) -> SaveResult:
@@ -265,9 +289,7 @@ class Vault:
             subcollection=subcollection,
             user_placed=True,
             embedding=self._embedder.embed(
-                embedding_text(
-                    existing.caption, existing.tags, collection, subcollection
-                )
+                self._embedding_text_for(existing, collection, subcollection)
             ),
         )
         self._store.update(moved)
@@ -309,9 +331,8 @@ class Vault:
             subcollection=correction.from_subcollection,
             user_placed=correction.from_user_placed,
             embedding=self._embedder.embed(
-                embedding_text(
-                    existing.caption,
-                    existing.tags,
+                self._embedding_text_for(
+                    existing,
                     correction.from_collection,
                     correction.from_subcollection,
                 )
@@ -319,6 +340,130 @@ class Vault:
         )
         self._store.update(restored)
         return restored
+
+    def _embedding_text_for(
+        self, reel: SavedReel, collection: str, subcollection: str | None
+    ) -> str:
+        """What an already-saved reel should be embedded as if it sat on a
+        different shelf. Everything except the shelf comes from the reel, so
+        a move cannot quietly drop the transcript a reel had already earned
+        — which is exactly what re-deriving the text from the caption alone
+        would do."""
+        return embedding_text(
+            reel.caption,
+            reel.tags,
+            collection,
+            subcollection,
+            reel.transcript_summary,
+            reel.frame_analysis_summary,
+        )
+
+    def process_media(self, url: str) -> SavedReel | None:
+        """Read the reel's video and record what it said and showed.
+
+        Slow — a download, a transcription and a run of vision calls — so the
+        caller runs it off the path that answers the user. It is the caller's
+        job to do that, not this method's: the vault stays synchronous, and
+        how work is got off the main thread is a property of the transport
+        running it.
+
+        Returns the updated reel, or None if the vault has no such reel or
+        no extractor is configured.
+        """
+        if self._media_extractor is None:
+            return None
+
+        normalized = normalize_reel_url(url)
+        if self._store.find_by_url(normalized) is None:
+            return None
+
+        try:
+            extraction = self._media_extractor.extract(normalized)
+        except Exception:
+            # The reel is already saved and already answers on its caption.
+            # A background job that takes the process down with it, or leaves
+            # a reel wedged on PENDING forever, is the worse outcome.
+            logger.exception("Media extraction raised for %s", normalized)
+            extraction = None
+
+        return self.attach_media(normalized, extraction)
+
+    def attach_media(
+        self, url: str, extraction: MediaExtraction | None
+    ) -> SavedReel | None:
+        """Record what a reel's video turned out to contain.
+
+        The reel is re-embedded, not merely annotated. A reel is findable by
+        the text it was embedded as, so a transcript written into a column
+        the embedding never saw would be words the vault holds and no query
+        can reach — the same trap that made a moved reel still findable under
+        the shelf it had left.
+
+        A failed extraction is recorded as failed rather than left pending.
+        Retrying forever on a video that has expired would re-download it on
+        every restart for as long as the reel exists.
+        """
+        normalized = normalize_reel_url(url)
+        existing = self._store.find_by_url(normalized)
+        if existing is None:
+            return None
+
+        if extraction is None or extraction.is_empty():
+            failed = replace(existing, processing_status=ProcessingStatus.FAILED)
+            self._store.update(failed)
+            return failed
+
+        transcript_summary = self._condense(extraction.transcript)
+        frame_summary = self._condense(extraction.frame_analysis)
+        updated = replace(
+            existing,
+            transcript_raw=extraction.transcript,
+            transcript_summary=transcript_summary,
+            frame_analysis_raw=extraction.frame_analysis,
+            frame_analysis_summary=frame_summary,
+            processing_status=ProcessingStatus.DONE,
+            embedding=self._embedder.embed(
+                embedding_text(
+                    existing.caption,
+                    existing.tags,
+                    existing.collection,
+                    existing.subcollection,
+                    transcript_summary,
+                    frame_summary,
+                )
+            ),
+        )
+        self._store.update(updated)
+        return updated
+
+    def _condense(self, raw: str) -> str:
+        """The compact half of a piece of media text.
+
+        With no condenser wired in, the raw text stands in for its own
+        summary rather than the reel losing the content entirely — a vault
+        that can search a whole transcript is worse than one that searches a
+        tight summary, but far better than one that searches neither.
+        """
+        if not raw.strip():
+            return ""
+        if self._condenser is None:
+            return raw
+        try:
+            return self._condenser.condense(raw)
+        except Exception:
+            logger.exception("Condensing media text failed; keeping it uncondensed")
+            return raw
+
+    def resume_pending_media(self) -> list[str]:
+        """The reels whose video was never read, for the caller to schedule.
+
+        The pipeline's queue lives in the running process and nothing else,
+        so an interrupted run leaves exactly this behind. Returning the work
+        rather than doing it keeps the decision about concurrency and pacing
+        with the transport, which is the only layer that knows what else it
+        is trying to do at the time.
+        """
+        return [reel.url for reel in self._store.find_awaiting_media()]
 
     def attach_thumbnail(self, url: str, thumbnail_ref: str) -> None:
         """Record a durable reference to a saved reel's picture. Only the
@@ -353,11 +498,9 @@ class Vault:
         if not matches:
             return NoMatch(query=query)
 
-        if kind is QueryKind.AGGREGATE:
-            sources = [SummarySource.of(reel) for reel in matches]
-            return AggregateAnswer(
-                text=self._summarizer.summarize(query, sources), reels=matches
-            )
+        written = self._written_answer(query, kind, matches)
+        if written is not None:
+            return written
 
         # An AUTHOR_FILTER reaching here named nobody the classifier could
         # pin down, so the semantic path is the better of the two guesses.
@@ -365,6 +508,39 @@ class Vault:
             return ListAnswer(query=query, reels=matches)
 
         return SingleItemAnswer(reel=matches[0])
+
+    def _written_answer(
+        self, query: str, kind: QueryKind, reels: list[SavedReel]
+    ) -> Answer | None:
+        """The three kinds that read the matched reels and write something,
+        or None for the kinds that just hand the reels back.
+
+        Each goes to its own adapter with its own instructions rather than
+        one prompt deciding for itself what shape to write in. That
+        distinction is the whole reason these are separate kinds: told only
+        to "answer the question", a model asked for the best of something
+        will write a summary of everything, and asked for a list will write
+        prose about one.
+        """
+        sources = [SummarySource.of(reel) for reel in reels]
+
+        if kind is QueryKind.AGGREGATE:
+            return AggregateAnswer(
+                text=self._summarizer.summarize(query, sources), reels=reels
+            )
+
+        if kind is QueryKind.COMPARE_RANK:
+            comparison = self._comparer.compare(query, sources)
+            return CompareAnswer(
+                text=comparison.text, criterion=comparison.criterion, reels=reels
+            )
+
+        if kind is QueryKind.EXTRACT_COMPILE:
+            return ExtractAnswer(
+                items=self._item_extractor.extract_items(query, sources), reels=reels
+            )
+
+        return None
 
     def _answer_from_collection(
         self, query: str, classification: QueryClassification
@@ -380,11 +556,9 @@ class Vault:
         if not reels:
             return NoMatch(query=query)
 
-        if kind is QueryKind.AGGREGATE:
-            sources = [SummarySource.of(reel) for reel in reels]
-            return AggregateAnswer(
-                text=self._summarizer.summarize(query, sources), reels=reels
-            )
+        written = self._written_answer(query, kind, reels)
+        if written is not None:
+            return written
 
         if kind is QueryKind.SINGLE:
             return SingleItemAnswer(reel=reels[0])

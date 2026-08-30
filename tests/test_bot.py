@@ -592,3 +592,56 @@ async def test_undo_on_a_reel_that_was_never_moved_says_so(bot: ReelVaultBot) ->
     await bot._on_callback(update, MagicMock())
 
     assert "nothing to undo" in query.answer.await_args.args[0].lower()
+
+
+async def test_a_ranked_reply_prints_the_measure_it_ranked_by(
+    bot: ReelVaultBot,
+) -> None:
+    """The bot never asks which reading of "best" was meant, so showing the
+    one it chose is the only way the user can tell it got it wrong."""
+    bot._vault = make_vault(
+        captions={"https://instagram.com/reel/B1": "bicep curl form tips"},
+    )
+    assert isinstance(bot._vault.save_reel("https://instagram.com/reel/B1"), Saved)
+
+    message = _make_message("best bicep exercise")
+    await bot._on_message(_make_update(message), MagicMock())
+
+    all_replies = "\n".join(call.args[0] for call in message.reply_text.await_args_list)
+    assert "Ranked by:" in all_replies
+    assert "instagram.com/p/B1" in all_replies  # and the reel behind the verdict
+
+
+async def test_a_compiled_reply_is_a_list_not_a_paragraph(bot: ReelVaultBot) -> None:
+    bot._vault = make_vault(
+        captions={
+            "https://instagram.com/reel/Q1": "interview question: tell me about yourself",
+            "https://instagram.com/reel/Q2": "interview question: why this company",
+        },
+    )
+    for url in ("https://instagram.com/reel/Q1", "https://instagram.com/reel/Q2"):
+        assert isinstance(bot._vault.save_reel(url), Saved)
+
+    message = _make_message("compile the interview questions")
+    await bot._on_message(_make_update(message), MagicMock())
+
+    all_replies = "\n".join(call.args[0] for call in message.reply_text.await_args_list)
+    assert "• interview question: tell me about yourself" in all_replies
+    assert "• interview question: why this company" in all_replies
+
+
+async def test_matching_reels_that_list_nothing_is_not_reported_as_no_match(
+    bot: ReelVaultBot,
+) -> None:
+    """"Nothing matches" would send the user hunting for saves that are
+    sitting right there — the reels matched, they just had no items in them."""
+    bot._vault = make_vault(captions={"https://instagram.com/reel/E1": "ai agents"})
+    assert isinstance(bot._vault.save_reel("https://instagram.com/reel/E1"), Saved)
+    bot._vault._item_extractor = MagicMock(extract_items=MagicMock(return_value=[]))
+
+    message = _make_message("compile the ai tools")
+    await bot._on_message(_make_update(message), MagicMock())
+
+    reply = message.reply_text.await_args.args[0]
+    assert reply != "Nothing in the vault matches that."
+    assert "none of them" in reply.lower()

@@ -9,7 +9,11 @@ from reel_vault.vault import Vault
 from tests.fakes import (
     FakeCaptionFetcher,
     FakeCollectionAssigner,
+    FakeComparer,
+    FakeCondenser,
     FakeEmbedder,
+    FakeItemExtractor,
+    FakeMediaExtractor,
     FakeQueryIntent,
     FakeSummarizer,
     FakeTagger,
@@ -30,6 +34,10 @@ def make_vault(
     collection_assigner: FakeCollectionAssigner | None = None,
     store: InMemoryReelStore | None = None,
     summarizer: FakeSummarizer | None = None,
+    comparer: FakeComparer | None = None,
+    item_extractor: FakeItemExtractor | None = None,
+    media_extractor: FakeMediaExtractor | None = None,
+    condenser: FakeCondenser | None = None,
     embedder: FakeEmbedder | None = None,
     query_intent: FakeQueryIntent | None = None,
     aggregate_triggers: tuple[str, ...] = ("give me all", "summarize", "every"),
@@ -52,6 +60,12 @@ def make_vault(
             else FakeQueryIntent(aggregate_triggers)
         ),
         summarizer=summarizer if summarizer is not None else FakeSummarizer(),
+        comparer=comparer if comparer is not None else FakeComparer(),
+        item_extractor=(
+            item_extractor if item_extractor is not None else FakeItemExtractor()
+        ),
+        media_extractor=media_extractor,
+        condenser=condenser,
         match_threshold=match_threshold,
         **top_k_overrides,
     )
