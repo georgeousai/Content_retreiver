@@ -4,9 +4,11 @@ version = "0.1.0"
 description = "Add your description here"
 requires-python = ">=3.12"
 dependencies = [
-    "google-genai>=1.0.0",
-    "groq>=1.7.0",
     "httpx>=0.28.1",
+    # Used as an HTTP client for the OpenAI-compatible wire format, not as a
+    # commitment to OpenAI: `base_url` decides who answers. Groq, DeepSeek,
+    # Qwen, Together, Mistral and Google's compatibility endpoint all speak it.
+    "openai>=1.60.0",
     # Headless: the frame sampler decodes video and encodes JPEGs, and never
     # opens a window. The GUI build pulls in a desktop toolkit for nothing.
     "opencv-python-headless>=4.10.0",

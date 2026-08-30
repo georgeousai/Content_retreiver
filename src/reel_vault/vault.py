@@ -3,7 +3,7 @@
 All environment-dependent behavior (Instagram fetching, tagging, embedding,
 persistence, query-intent classification, summarization) is injected as
 adapters conforming to `reel_vault.ports`. This module has no knowledge of
-Telegram, Groq, Postgres, or any other concrete integration.
+Telegram, any model provider, Postgres, or any other concrete integration.
 """
 
 from __future__ import annotations

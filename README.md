@@ -27,7 +27,7 @@ flowchart LR
 
     C --> D["Caption + author<br/>extraction"]
     D --> D2["📁 Collection<br/>(reuses existing)"]
-    D2 --> E["🏷️ Tagging<br/>(Groq LLM)"]
+    D2 --> E["🏷️ Tagging<br/>(LLM)"]
     E --> F["🧮 Embedding<br/>(local, CPU)"]
     F --> G[("🗄️ Postgres<br/>+ pgvector")]
     G --> B
@@ -90,8 +90,8 @@ A third slice ([`.scratch/reel-vault-media-pipeline/`](.scratch/reel-vault-media
 |---|---|---|
 | 01 | Media columns, condensing, and re-embedding a reel around what its video said | ✅ Done |
 | 02 | Real video download, with the file guaranteed deleted afterwards | ✅ Done |
-| 03 | Audio transcription via Groq Whisper | ✅ Done |
-| 04 | Scene-detected frame sampling and on-screen text reading via Gemini Flash | ✅ Done |
+| 03 | Audio transcription | ✅ Done |
+| 04 | Scene-detected frame sampling and on-screen text reading | ✅ Done |
 | 05 | Background processing after save, resumed after a restart | ✅ Done |
 | 06 | Compare/rank and extract/compile query kinds | ✅ Done |
 
@@ -105,7 +105,9 @@ The whole system is organized around one idea: **a core that knows nothing about
 
 The vault is entered through two operations — `save_reel(url)` and `ask(query)`. A handful of others exist for work that arrives *after* a save and cannot be part of it: `attach_thumbnail` (only the transport can mint a durable picture reference), `process_media`/`attach_media`/`resume_pending_media` (reading a reel's video takes minutes, so it happens off the save path), and `refile`/`undo_last_move` (the user overruling where a reel was filed). Each is a follow-up to a save, never a second way in.
 
-What does not vary: everything environment-dependent (Telegram, Instagram, the LLM, the embedding model, the transcriber, the vision model, the database) is injected as an adapter behind a `Protocol`. The vault never imports Telegram, Groq, Gemini, or psycopg.
+What does not vary: everything environment-dependent (Telegram, Instagram, the LLM, the embedding model, the transcriber, the vision model, the database) is injected as an adapter behind a `Protocol`. The vault never imports Telegram, psycopg, or any model provider.
+
+**No provider is named outside the adapters.** Every model this app talks to — chat, speech-to-text, vision — is reached over the OpenAI-compatible HTTP shape that Groq, OpenAI, DeepSeek, Qwen, Together, Moonshot, Mistral and Google's compatibility endpoint all speak. So which provider is in use is a base URL, a key and a model name in `.env`, not a code path: moving off today's provider is a config edit, not a new adapter. The defaults point at Groq's free tier because that is what this runs on today, not because anything depends on it.
 
 ```
 src/reel_vault/
@@ -120,17 +122,17 @@ src/reel_vault/
 ├── main.py         ← wires real adapters into the vault, starts polling
 └── adapters/
     ├── caption.py         ← oEmbed → yt-dlp fallback chain
-    ├── groq_llm.py        ← tagging, intent, summarize/compare/extract, condensing
+    ├── llm.py             ← tagging, intent, summarize/compare/extract, condensing
     ├── media.py           ← download → transcribe → sample frames → read → delete
-    ├── transcribe.py      ← Groq Whisper
-    ├── vision.py          ← Gemini Flash, reading sampled frames
+    ├── transcribe.py      ← speech-to-text
+    ├── vision.py          ← reading sampled frames
     ├── embedder.py        ← local sentence-transformers, CPU only
     └── postgres_store.py  ← Postgres/pgvector persistence
 ```
 
 This buys two concrete things:
 
-**Tests run in milliseconds with no network.** The seam is exercised with fake adapters — a canned caption fetcher, a deterministic tagger, a bag-of-words embedder, an in-memory store. No test spins up a bot, calls Groq, or touches a database.
+**Tests run in milliseconds with no network.** The seam is exercised with fake adapters — a canned caption fetcher, a deterministic tagger, a bag-of-words embedder, an in-memory store. No test spins up a bot, calls a model provider, or touches a database.
 
 **New sources are new adapters, not surgery.** Adding LinkedIn means writing a caption fetcher. Transcription and frame reading arrived the same way — as `MediaExtractor` and `ContentCondenser` adapters behind the existing seam. Neither touched `save_reel`'s contract.
 
@@ -140,10 +142,10 @@ This buys two concrete things:
 |---|---|---|
 | Intake | Telegram bot, long-polling | Native share-sheet target; no webhook or public endpoint needed |
 | Caption extraction | Instagram oEmbed → `yt-dlp` fallback | Caption text only, so a save stays fast |
-| Transcription | Groq Whisper (`whisper-large-v3-turbo`), free tier | The mp4 goes straight up — no ffmpeg between a save and its transcript |
-| Frame reading | Scene detection (PySceneDetect + OpenCV) → Gemini Flash | Cuts are where the picture actually changes; a fixed timer misses a card that flashes by |
+| Transcription | Any OpenAI-compatible `/audio/transcriptions` (default: Groq Whisper, free tier) | The mp4 goes straight up — no ffmpeg between a save and its transcript |
+| Frame reading | Scene detection (PySceneDetect + OpenCV) → any vision-capable chat model (default: Gemini Flash) | Cuts are where the picture actually changes; a fixed timer misses a card that flashes by |
 | Video files | Downloaded to a temp dir, deleted after reading | Disk never grows with the vault — the "no stored media" rule holds |
-| Tagging & synthesis | Groq free tier (`openai/gpt-oss-20b`) | Open-weight model, no per-reel cost |
+| Tagging & synthesis | Any OpenAI-compatible `/chat/completions` (default: Groq free tier, `openai/gpt-oss-20b`) | Swappable by config; open-weight default, no per-reel cost |
 | Embeddings | `all-MiniLM-L6-v2` via `sentence-transformers` | 384-dim, runs locally on CPU, zero API calls |
 | Storage | Postgres + `pgvector` | One row per reel; cosine similarity search in the database |
 | Hosting | Your machine | If the bot is offline, Telegram queues the message for next run |
@@ -157,7 +159,7 @@ This buys two concrete things:
 - **Python 3.12+** and [`uv`](https://docs.astral.sh/uv/)
 - **Docker** (for the Postgres + pgvector container)
 - A **Telegram bot token** — message [@BotFather](https://t.me/botfather), send `/newbot`
-- A **Groq API key** — free at [console.groq.com](https://console.groq.com)
+- An **API key for any OpenAI-compatible model provider** — free at [console.groq.com](https://console.groq.com), which is the default
 
 ### 1. Start the database
 
@@ -181,16 +183,25 @@ The app creates the `vector` extension and the `saved_reels` table itself on fir
 cp .env.example .env
 ```
 
-Fill in the three required values, and optionally a Gemini key:
+Fill in the required values. Only `LLM_API_KEY` picks a provider — base URL and model default to Groq's free tier, and every provider setting is overridable:
 
 ```ini
 TELEGRAM_BOT_TOKEN=your-token-from-botfather
-GROQ_API_KEY=your-groq-key
 DATABASE_URL=postgresql://postgres:reelvault@localhost:5434/reel_vault
-GEMINI_API_KEY=your-gemini-key
+LLM_API_KEY=your-key
+VISION_API_KEY=your-vision-key
 ```
 
-`GEMINI_API_KEY` is optional. Without it reels are still downloaded and transcribed; only the reading of on-screen text is off, and the bot says so at startup rather than refusing to run.
+`VISION_API_KEY` is optional. Without it reels are still downloaded and transcribed; only the reading of on-screen text is off, and the bot says so at startup rather than refusing to run.
+
+To run on a different provider, add its endpoint — no code changes:
+
+```ini
+LLM_BASE_URL=https://api.deepseek.com/v1
+LLM_MODEL=deepseek-chat
+```
+
+`TRANSCRIPTION_*` defaults to the same provider and key as `LLM_*`, since one provider commonly serves both; override it when yours doesn't. See `.env.example` for every knob.
 
 `.env` is gitignored — your credentials stay local.
 
@@ -236,7 +247,7 @@ Two things that will bite eventually, documented so they don't cost you an after
 
 **Instagram's oEmbed endpoint always fails.** Meta deprecated the public `api.instagram.com/oembed` endpoint — it returns a 500 without an app access token. The `yt-dlp` fallback does all the real work. The oEmbed attempt costs about a second per save and is kept only because the spec calls for oEmbed-first; it's safe to remove.
 
-**Groq's model lineup shifts.** The originally-specified Llama chat models have already been retired from the free tier. If tagging starts returning 404s, run `client.models.list()` to see what's currently available and update `DEFAULT_MODEL` in `adapters/groq_llm.py` — it's a single constant.
+**Free-tier model lineups shift.** The originally-specified Llama chat models were retired from Groq's free tier mid-project. If tagging starts returning 404s, set `LLM_MODEL` in `.env` to something currently served — no code change, and the same lever moves you to a different provider entirely.
 
 **Tuning retrieval.** `vault.py` exposes `DEFAULT_MATCH_THRESHOLD` (0.35) and one cap per question type: `DEFAULT_TOP_K_SINGLE` (5), `DEFAULT_TOP_K_LIST` (50), `DEFAULT_TOP_K_AGGREGATE` (15). They differ on purpose — a list costs only a database read, while every reel in an aggregate becomes part of a single LLM prompt, so the free-tier budget is what bounds it. Raise the threshold if unrelated reels surface; lower it if good matches are being rejected as `NoMatch`.
 

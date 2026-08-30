@@ -1,12 +1,17 @@
-"""Groq-backed adapters: open-vocabulary tagging, aggregate/single-item query
-classification, and cross-caption summarization. All on Groq's free tier
-using an open-weight model.
+"""The adapters that write text: tagging, query classification, collection
+assignment, summarizing, ranking, compiling, and condensing a transcript.
 
-Groq's free-tier model lineup changes over time; the Llama-family chat
-models the original spec called for have since been deprecated on Groq.
-`openai/gpt-oss-20b` is the current open-weight equivalent. If this starts
-404ing again, run `client.models.list()` to see what's currently available
-and update DEFAULT_MODEL."""
+All of them are one HTTP call to `/chat/completions` — the shape Groq,
+OpenAI, DeepSeek, Qwen, Together, Moonshot, Mistral and Google's
+compatibility endpoint all speak. Nothing here names a provider: which one
+answers is a base URL, a key and a model name handed in at startup, so
+moving off today's provider is an `.env` edit rather than a new adapter.
+
+What is provider-specific, and stays here rather than leaking outward, is
+that models return JSON wrapped in whatever they feel like — fences, a
+preamble, a trailing apology. `_loads_json` absorbs that, because a reply
+that fails to parse is never an error the user sees; it is silently the
+wrong answer shape."""
 
 from __future__ import annotations
 
@@ -15,8 +20,9 @@ import logging
 import re
 from collections.abc import Iterable
 
-from groq import Groq
+from openai import OpenAI
 
+from reel_vault.config import ModelEndpoint
 from reel_vault.models import (
     UNCATEGORIZED,
     CollectionAssignment,
@@ -28,8 +34,6 @@ from reel_vault.models import (
 )
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_MODEL = "openai/gpt-oss-20b"
 
 # What a ranked answer says it ranked by when the model failed to say. Spelled
 # out rather than left empty: the answer is shown to the user, and a blank
@@ -279,11 +283,21 @@ COLLECTION_SYSTEM_PROMPT = (
 )
 
 
-class _GroqChatAdapter:
-    """Shared request boilerplate for the Groq chat-completion adapters below."""
+def chat_client(endpoint: ModelEndpoint) -> OpenAI:
+    """A client pointed at whichever provider is configured.
 
-    def __init__(self, *, client: Groq | None = None, model: str = DEFAULT_MODEL) -> None:
-        self._client = client or Groq()
+    The `openai` package is used as an HTTP client for a wire format, not as
+    a commitment to OpenAI: `base_url` is what decides who answers, and every
+    provider this app is likely to use serves that format.
+    """
+    return OpenAI(base_url=endpoint.base_url, api_key=endpoint.api_key)
+
+
+class _ChatAdapter:
+    """Shared request boilerplate for the chat-completion adapters below."""
+
+    def __init__(self, *, client: OpenAI, model: str) -> None:
+        self._client = client
         self._model = model
 
     def _complete(self, *, system_prompt: str, user_content: str, temperature: float) -> str:
@@ -298,7 +312,7 @@ class _GroqChatAdapter:
         return response.choices[0].message.content or ""
 
 
-class GroqTagger(_GroqChatAdapter):
+class ChatTagger(_ChatAdapter):
     def tag(self, caption: str) -> list[str]:
         content = self._complete(
             system_prompt=TAG_SYSTEM_PROMPT, user_content=caption, temperature=0.2
@@ -306,7 +320,7 @@ class GroqTagger(_GroqChatAdapter):
         return _parse_tag_list(content or "[]")
 
 
-class GroqQueryIntent(_GroqChatAdapter):
+class ChatQueryIntent(_ChatAdapter):
     def classify(self, query: str, collections: list[str]) -> QueryClassification:
         existing = ", ".join(sorted(collections)) if collections else "(none yet)"
         content = self._complete(
@@ -317,7 +331,7 @@ class GroqQueryIntent(_GroqChatAdapter):
         return _parse_classification(content, collections)
 
 
-class GroqCollectionAssigner(_GroqChatAdapter):
+class ChatCollectionAssigner(_ChatAdapter):
     def assign(
         self,
         caption: str,
@@ -340,7 +354,7 @@ class GroqCollectionAssigner(_GroqChatAdapter):
         return _parse_assignment(content, known)
 
 
-class GroqSummarizer(_GroqChatAdapter):
+class ChatSummarizer(_ChatAdapter):
     def summarize(self, query: str, sources: list[SummarySource]) -> str:
         return self._complete(
             system_prompt=SUMMARY_SYSTEM_PROMPT,
@@ -349,7 +363,7 @@ class GroqSummarizer(_GroqChatAdapter):
         )
 
 
-class GroqComparer(_GroqChatAdapter):
+class ChatComparer(_ChatAdapter):
     def compare(self, query: str, sources: list[SummarySource]) -> Comparison:
         content = self._complete(
             system_prompt=COMPARE_SYSTEM_PROMPT,
@@ -361,7 +375,7 @@ class GroqComparer(_GroqChatAdapter):
         return _parse_comparison(content)
 
 
-class GroqItemExtractor(_GroqChatAdapter):
+class ChatItemExtractor(_ChatAdapter):
     def extract_items(self, query: str, sources: list[SummarySource]) -> list[str]:
         content = self._complete(
             system_prompt=EXTRACT_SYSTEM_PROMPT,
@@ -371,7 +385,7 @@ class GroqItemExtractor(_GroqChatAdapter):
         return _parse_items(content)
 
 
-class GroqContentCondenser(_GroqChatAdapter):
+class ChatContentCondenser(_ChatAdapter):
     def condense(self, text: str) -> str:
         return self._complete(
             system_prompt=CONDENSE_SYSTEM_PROMPT,
@@ -589,7 +603,7 @@ def _parse_items(content: str) -> list[str]:
 def _parse_tag_list(content: str) -> list[str]:
     parsed = _loads_json(content)
     if parsed is None:
-        logger.warning("Groq tagger returned non-JSON content: %r", content)
+        logger.warning("Tagger returned non-JSON content: %r", content)
         return []
 
     if not isinstance(parsed, list):

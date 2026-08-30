@@ -1,6 +1,6 @@
 """Smoke tests for the Telegram-adapter layer: it should correctly delegate
 to `Vault.save_reel`/`Vault.ask` and relay results as replies. No real
-Telegram, Instagram, Groq, or Postgres calls are made."""
+Telegram, Instagram, model-provider, or Postgres calls are made."""
 
 from __future__ import annotations
 

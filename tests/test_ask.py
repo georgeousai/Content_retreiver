@@ -105,7 +105,7 @@ def test_list_query_is_not_capped_at_the_single_item_limit() -> None:
 
 
 def test_aggregate_query_is_capped_below_the_list_limit() -> None:
-    """Every matched caption goes into one Groq prompt, so aggregate stays
+    """Every matched caption goes into one LLM prompt, so aggregate stays
     bounded well below the (free) list cap."""
     vault, _ = _vault_with_many_matching_reels(20)
 

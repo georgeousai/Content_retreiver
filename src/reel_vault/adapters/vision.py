@@ -1,5 +1,10 @@
-"""Reading a reel's frames — the text on screen and what is being shown — via
-Gemini Flash's free tier.
+"""Reading a reel's frames — the text on screen and what is being shown.
+
+Also a `/chat/completions` call, with the frames attached as image parts.
+That is the multimodal shape OpenAI defined and everyone else adopted,
+including Google's compatibility endpoint, so this needs no vendor SDK of
+its own and no second code path: which model looks at the frames is a base
+URL, a key and a model name.
 
 Every sampled frame goes into one request rather than one request per frame.
 The frames are a sequence, and a list of text cards read together can be
@@ -9,11 +14,16 @@ unrelated fragments with the same header repeated on each.
 
 from __future__ import annotations
 
+import base64
 import logging
 
-logger = logging.getLogger(__name__)
+from openai import OpenAI
+from openai.types.chat import (
+    ChatCompletionContentPartParam,
+    ChatCompletionUserMessageParam,
+)
 
-DEFAULT_MODEL = "gemini-2.5-flash"
+logger = logging.getLogger(__name__)
 
 FRAME_PROMPT = """\
 These are still frames sampled in order from one short vertical social-media \
@@ -34,34 +44,35 @@ and never infer what is being said aloud - you cannot hear this video.
 - No preamble and no closing remark. Start with the text you read."""
 
 
-class GeminiFrameAnalyzer:
-    def __init__(self, api_key: str, *, model: str = DEFAULT_MODEL) -> None:
-        self._api_key = api_key
+class VisionFrameAnalyzer:
+    def __init__(self, *, client: OpenAI, model: str) -> None:
+        self._client = client
         self._model = model
-        self._client = None
 
     def analyze(self, frames: list[bytes]) -> str:
         if not frames:
             return ""
 
-        from google.genai import types
-
-        client = self._ensure_client()
-        parts = [
-            types.Part.from_bytes(data=frame, mime_type="image/jpeg")
-            for frame in frames
+        content: list[ChatCompletionContentPartParam] = [
+            {"type": "text", "text": FRAME_PROMPT},
+            *(_image_part(frame) for frame in frames),
         ]
-        response = client.models.generate_content(
-            model=self._model, contents=[FRAME_PROMPT, *parts]
+        message: ChatCompletionUserMessageParam = {"role": "user", "content": content}
+        response = self._client.chat.completions.create(
+            model=self._model, messages=[message], temperature=0.0
         )
-        return (getattr(response, "text", "") or "").strip()
+        return (response.choices[0].message.content or "").strip()
 
-    def _ensure_client(self):
-        """Built on first use, not in __init__: this adapter is constructed
-        at startup for every run, and a vision client is only ever needed by
-        a background job that may not happen for hours."""
-        if self._client is None:
-            from google import genai
 
-            self._client = genai.Client(api_key=self._api_key)
-        return self._client
+def _image_part(frame: bytes) -> ChatCompletionContentPartParam:
+    """A frame as the chat API takes images: a data URI rather than a link.
+
+    These frames exist only inside this call — they were decoded from a video
+    that is deleted moments later — so there is nowhere to host them, and a
+    URL would mean uploading images somewhere just to reference them back.
+    """
+    encoded = base64.b64encode(frame).decode()
+    return {
+        "type": "image_url",
+        "image_url": {"url": f"data:image/jpeg;base64,{encoded}"},
+    }

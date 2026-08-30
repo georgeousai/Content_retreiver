@@ -1,6 +1,7 @@
 """Adapter protocols the vault depends on. Environment-specific implementations
-(Instagram fetching, Groq, sentence-transformers, Postgres/pgvector, ...) live
-under `reel_vault.adapters` and are injected into `Vault`, never imported by it.
+(Instagram fetching, chat/speech/vision models, sentence-transformers,
+Postgres/pgvector, ...) live under `reel_vault.adapters` and are injected
+into `Vault`, never imported by it.
 """
 
 from __future__ import annotations
