@@ -201,7 +201,15 @@ LLM_BASE_URL=https://api.deepseek.com/v1
 LLM_MODEL=deepseek-chat
 ```
 
-`TRANSCRIPTION_*` defaults to the same provider and key as `LLM_*`, since one provider commonly serves both; override it when yours doesn't. See `.env.example` for every knob.
+`TRANSCRIPTION_*` and `CONDENSER_*` default to the same provider and key as `LLM_*`, since one provider commonly serves all of it; override them when yours doesn't. `CONDENSER_*` is the one worth knowing about: it points the step that compresses a reel's transcript into what search reads, and that step has a measured failure the others don't — it sometimes empties transcripts full of real content, at a rate that varies by model. Pointing it at a second provider is a one-line change:
+
+```ini
+CONDENSER_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
+CONDENSER_API_KEY=your-google-key
+CONDENSER_MODEL=gemini-2.5-flash
+```
+
+See `.env.example` for every knob.
 
 `.env` is gitignored — your credentials stay local.
 

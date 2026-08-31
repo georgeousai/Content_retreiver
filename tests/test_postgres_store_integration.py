@@ -217,3 +217,40 @@ def test_duplicate_save_does_not_create_a_second_row(store) -> None:
 
     assert found is not None
     assert found.tags == ["first"]
+
+
+def test_it_builds_its_own_schema_on_a_brand_new_database() -> None:
+    """The README's promise: "The app creates the `vector` extension and the
+    `saved_reels` table itself on first run."
+
+    It could not. `register_vector` has to look the `vector` type up in the
+    database, and it ran before the `CREATE EXTENSION` that makes one, so a
+    first run against an empty database died with "vector type not found in
+    the database". Every existing vault already had the extension, so the
+    only way to see it is to point the store at a database that has never
+    held one -- which is what this test does, on a database it creates and
+    drops.
+    """
+    import psycopg
+
+    from reel_vault.adapters.postgres_store import PostgresReelStore
+
+    # The module-level skipif already guarantees this; the assert is for the
+    # type checker, which cannot see that far.
+    assert DSN is not None
+    name = f"reel_vault_pytest_{uuid.uuid4().hex[:12]}"
+    server = DSN.rsplit("/", 1)[0]
+    admin_dsn = f"{server}/postgres"
+    fresh_dsn = f"{server}/{name}"
+
+    with psycopg.connect(admin_dsn, autocommit=True) as admin:
+        admin.execute(f"CREATE DATABASE {name}")
+    try:
+        store = PostgresReelStore(fresh_dsn)
+        # Reached at all means the extension existed by the time
+        # `register_vector` looked, and that the table was created after it.
+        assert store.find_by_url("https://instagram.com/p/nothing-here") is None
+        store._conn.close()
+    finally:
+        with psycopg.connect(admin_dsn, autocommit=True) as admin:
+            admin.execute(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)")

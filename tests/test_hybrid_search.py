@@ -71,6 +71,60 @@ def test_a_reel_is_embedded_with_its_shelf_and_tags_not_just_its_caption() -> No
     assert "5yrs ago this wasn't a thing" in text
 
 
+def test_what_the_video_said_is_embedded_before_the_shelf_it_sits_on() -> None:
+    """Order matters here only because the embedder throws away the end.
+
+    `all-MiniLM-L6-v2` truncates at 256 word-pieces without warning, and 7 of
+    33 reels in the live vault overflow it, so the tail of this string is the
+    part that silently stops being searchable. The media summaries have to
+    survive that cut: they are the only text a comment-bait reel has, and
+    embedding is their only retrieval path. Collection and tags have two
+    others -- the keyword arm reads them untruncated, and a collection asked
+    for by name is looked up without embedding at all -- so they are what can
+    afford to be at the end.
+
+    Asserted as positions rather than as a fixed string, so re-punctuating the
+    joiner does not fail a test that is about ordering.
+    """
+    text = embedding_text(
+        caption="comment HABITS for my list",
+        tags=["hiring"],
+        collection="Product Management",
+        subcollection="Interviews",
+        transcript_summary="wake at five, cold shower, journal before your phone",
+        frame_analysis_summary="text card: 5 habits that changed my mornings",
+    )
+
+    assert text.index("comment HABITS") < text.index("wake at five")
+    assert text.index("wake at five") < text.index("Product Management")
+    assert text.index("text card") < text.index("Product Management")
+    assert text.index("Product Management") < text.index("Interviews") < text.index(
+        "hiring"
+    )
+
+
+def test_a_reel_with_no_media_still_assembles_cleanly() -> None:
+    """Most of the vault predates the media pipeline and has neither summary.
+    The reorder must not leave an empty slot or a doubled separator where they
+    would have been.
+
+    Note what this string is NOT: unchanged. The metadata used to lead, so
+    every reel's embedded text is assembled differently now, media or no
+    media. Stored vectors are not recomputed, so until a reel is re-embedded
+    -- by a move, or by its video being read -- its vector still reflects the
+    old order. That is a backfill question, recorded in
+    `.scratch/reel-vault-media-pipeline/STATUS.md`, not something this
+    function can fix.
+    """
+    text = embedding_text(
+        "5yrs ago this wasn't a thing", ["hiring"], "Product Management", "Interviews"
+    )
+
+    assert text == (
+        "5yrs ago this wasn't a thing | Product Management | Interviews | hiring"
+    )
+
+
 def test_the_keyword_half_of_a_reel_excludes_its_caption() -> None:
     """The caption is long free-form prose that shares words with any query by
     chance; letting it into the keyword arm would let a coincidence outrank a

@@ -1,7 +1,7 @@
 """Regression tests for the condenser wrongly emptying real content.
 
 `ChatContentCondenser` returns "" when a reel's transcript carries nothing
-worth keeping. Measured live on 2026-08-31 against `openai/gpt-oss-20b` at
+worth keeping. Measured on 2026-08-31 against `openai/gpt-oss-20b` at
 temperature 0.0, it also emptied transcripts that were full of substance:
 
     chicken recipe (713 chars)   emptied  9/10   should keep
@@ -10,27 +10,41 @@ temperature 0.0, it also emptied transcripts that were full of substance:
     fragrance intro (157 chars)  emptied 10/10   correct
     "." / "Thank you."           emptied 10/10   correct
 
-An emptied transcript is not a visible failure — the reel is still marked
-`done`, and the content is simply never searchable — so the guard has to be
+An emptied transcript is not a visible failure -- the reel is still marked
+`done`, and the content is simply never searchable -- so the guard has to be
 a test rather than something noticed in use.
 
-The attempted fix follows the pattern `.scratch/known-issues.md` records for
-the summarizer's caption-crediting hallucination: an abstract rule did not
-hold there, and a concrete counter-example naming the exact failure shape
-did. The counter-example here is the chicken recipe below, verbatim.
+The fix follows the pattern `.scratch/known-issues.md` records for the
+summarizer's caption-crediting hallucination: an abstract rule did not hold
+there, and a concrete counter-example naming the exact failure shape did. The
+counter-example here is the chicken recipe below, verbatim.
 
-**Whether it works is not yet established, and the prompt as it ships here
-has never been run against a model.** Establishing the baseline above
-exhausted the provider's 200,000-tokens-per-day cap. Two samples squeezed
-through afterwards — one emptied the recipe, one condensed it correctly —
-but both were against a longer draft of the prompt that has since been
-trimmed, so they do not measure what is committed. The live tests at the
-bottom of this file are how to find out; run them before calling this fixed.
+**It has now been measured, but on a different provider.** Groq's daily cap
+was exhausted, so the live run below went to `gemini-3.5-flash-lite` instead,
+5 runs per transcript:
+
+    chicken recipe        kept >= 4/5   the 9/10 failure is gone
+    Hindi interview-prep  kept >= 4/5   the 4/10 failure is gone
+    fragrance intro       emptied 2/5   WRONG - see below
+    "." / "Thank you."    emptied both  correct
+
+So the bug this file was written for is fixed on that model, and a control
+now fails the other way: the fragrance reel is a pure hook naming no
+fragrances, and Gemini restates it ("five summer fragrances that get a lot of
+compliments") instead of emptying it. Groq emptied it 10/10. The two
+providers fail in mirror image -- Groq throws away real content, Gemini keeps
+content-free hooks -- and of the two, Gemini's is much the cheaper failure.
+
+`test_live_a_bare_hook_is_still_emptied` is left asserting the intended
+behaviour rather than relaxed to match. It is reporting a real gap on that
+model, which is what it is for. Re-measuring on Groq, so this is one prompt
+against two providers rather than one provider against another's baseline, is
+the open item in `.scratch/reel-vault-media-pipeline/STATUS.md`.
 
 The default run is hermetic: it pins the real transcripts and asserts the
 prompt still carries the counter-example, which is what regresses when
-someone tidies the prompt. Set RUN_LIVE_MODEL_TESTS=1 to also re-run the
-measurement above against the configured provider.
+someone tidies the prompt. Set RUN_LIVE_MODEL_TESTS=1 to re-run the
+measurement above against whatever `CONDENSER_*` points at.
 """
 
 from __future__ import annotations
@@ -147,8 +161,18 @@ def condenser():
     from reel_vault.adapters.llm import ChatContentCondenser, chat_client
     from reel_vault.config import load_config
 
+    # `config.condenser`, not `config.llm`: the emptying rate is a property of
+    # the model, so which model this measurement ran against is the whole
+    # point of the measurement. Pointing CONDENSER_* at a second provider is
+    # how the two get compared, and this fixture follows it there.
     config = load_config()
-    return ChatContentCondenser(client=chat_client(config.llm), model=config.llm.model)
+    print(
+        f"\ncondenser under test: {config.condenser.model} "
+        f"at {config.condenser.base_url}"
+    )
+    return ChatContentCondenser(
+        client=chat_client(config.condenser), model=config.condenser.model
+    )
 
 
 @live_only

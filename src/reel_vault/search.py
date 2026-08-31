@@ -59,8 +59,8 @@ def embedding_text(
     transcript_summary: str = "",
     frame_analysis_summary: str = "",
 ) -> str:
-    """The text a reel is embedded as — its curated metadata, its caption, and
-    what its video turned out to say and show.
+    """The text a reel is embedded as — its caption, what its video turned out
+    to say and show, and the curated metadata it was filed under.
 
     Caption alone is too thin a signal to retrieve on. A reel filed under
     "Product Management > Interviews", tagged "case prep", scored 0.330
@@ -78,14 +78,30 @@ def embedding_text(
     creator actually said out loud. Only the condensed halves belong here:
     embedding a full transcript would swamp the caption and the shelf it sits
     on, and the raw text is kept for regenerating a summary, not for search.
+
+    **The order is load-bearing, because the embedder truncates silently.**
+    `all-MiniLM-L6-v2` takes 256 word-pieces and sentence-transformers drops
+    the rest without a warning. Across the live vault 7 of 33 reels overflow
+    that, so whatever sits last in this string is what stops being searchable
+    — and with the metadata leading, that was the media summaries, on 2 of
+    the 3 overflowing reels that had them. The one thing the media pipeline
+    exists to make findable was the first thing thrown away.
+
+    So the caption and the media summaries lead, and the curated metadata
+    trails. Not because the metadata matters less, but because it is the part
+    that can afford to be cut: the collection, sub-collection and tags are
+    matched word-for-word by the keyword arm on their own untruncated text
+    (`metadata_text`), and a collection asked for by name is looked up
+    directly without any embedding at all. Losing them here costs a reel one
+    of three retrieval paths. What a reel said and showed has only this one.
     """
     parts = (
-        collection,
-        subcollection or "",
-        " ".join(tags),
         caption,
         transcript_summary,
         frame_analysis_summary,
+        collection,
+        subcollection or "",
+        " ".join(tags),
     )
     return " | ".join(part.strip() for part in parts if part.strip())
 

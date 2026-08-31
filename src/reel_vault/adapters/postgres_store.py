@@ -25,9 +25,15 @@ logger = logging.getLogger(__name__)
 # that isn't there gets said out loud rather than waited on forever.
 DEFAULT_CONNECT_TIMEOUT = 10
 
-SCHEMA = f"""
-CREATE EXTENSION IF NOT EXISTS vector;
+# Separate from SCHEMA and run before it, because `register_vector` has to
+# look the `vector` type up in the database and cannot find one that has not
+# been created yet. Left inside SCHEMA, this ran one statement too late: on
+# an existing vault it made no difference, and on a brand-new database it
+# failed at startup with "vector type not found in the database" - the one
+# case the README promises the app sets itself up in.
+EXTENSION = "CREATE EXTENSION IF NOT EXISTS vector;"
 
+SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS saved_reels (
     normalized_url TEXT PRIMARY KEY,
     caption TEXT NOT NULL,
@@ -126,6 +132,7 @@ class PostgresReelStore:
                 f"{connect_timeout}s. Is the database container running? "
                 f"(psycopg: {exc})"
             ) from exc
+        self._conn.execute(EXTENSION)
         register_vector(self._conn)
         self._conn.execute(SCHEMA)
         logger.info("Connected to Postgres; vault ready.")

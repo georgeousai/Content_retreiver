@@ -42,9 +42,17 @@ class ModelEndpoint:
 class Config:
     telegram_bot_token: str
     database_url: str
-    # Writes tags, collections, query classifications, summaries, rankings,
-    # compiled lists, and condensed transcripts.
+    # Writes tags, collections, query classifications, summaries, rankings
+    # and compiled lists.
     llm: ModelEndpoint
+    # Condenses a reel's transcript and frame reading down to what search
+    # reads. Its own endpoint because this one job has a measured failure the
+    # others do not — it empties transcripts full of real content, at a rate
+    # that is a property of the model rather than of the prompt (see
+    # .scratch/reel-vault-media-pipeline/STATUS.md). Pointing it at a second
+    # provider is how that gets tested, and how it gets fixed if the prompt
+    # turns out not to be the lever.
+    condenser: ModelEndpoint
     # Hears a reel. Its own endpoint because the provider that hosts the best
     # free chat model is not necessarily the one hosting speech-to-text —
     # though when it is, it needs no separate configuration.
@@ -61,6 +69,7 @@ def load_config() -> Config:
 
     llm_base_url = os.environ.get("LLM_BASE_URL") or DEFAULT_LLM_BASE_URL
     llm_api_key = _require_env("LLM_API_KEY")
+    llm_model = os.environ.get("LLM_MODEL") or DEFAULT_LLM_MODEL
 
     return Config(
         telegram_bot_token=_require_env("TELEGRAM_BOT_TOKEN"),
@@ -68,17 +77,23 @@ def load_config() -> Config:
         llm=ModelEndpoint(
             base_url=llm_base_url,
             api_key=llm_api_key,
-            model=os.environ.get("LLM_MODEL") or DEFAULT_LLM_MODEL,
+            model=llm_model,
         ),
-        # Falls back to the chat provider rather than demanding its own keys:
-        # one provider commonly serves both, and asking for the same
-        # credentials twice is a setup step that exists only to be forgotten.
+        # Both of the next two fall back to the chat provider rather than
+        # demanding their own keys: one provider commonly serves all of it,
+        # and asking for the same credentials twice is a setup step that
+        # exists only to be forgotten.
         transcription=ModelEndpoint(
             base_url=os.environ.get("TRANSCRIPTION_BASE_URL") or llm_base_url,
             api_key=os.environ.get("TRANSCRIPTION_API_KEY") or llm_api_key,
             model=(
                 os.environ.get("TRANSCRIPTION_MODEL") or DEFAULT_TRANSCRIPTION_MODEL
             ),
+        ),
+        condenser=ModelEndpoint(
+            base_url=os.environ.get("CONDENSER_BASE_URL") or llm_base_url,
+            api_key=os.environ.get("CONDENSER_API_KEY") or llm_api_key,
+            model=os.environ.get("CONDENSER_MODEL") or llm_model,
         ),
         vision=_optional_vision(),
     )

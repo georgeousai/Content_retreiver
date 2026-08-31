@@ -29,17 +29,49 @@ FRAME_PROMPT = """\
 These are still frames sampled in order from one short vertical social-media \
 video. Report what the video shows.
 
-Transcribe EVERY piece of on-screen text exactly as written, in the order the \
-frames appear. On-screen text is the point of this task: these videos often \
-carry their whole content as text cards, and a missed card is content lost.
+Transcribe the text this video is carrying, exactly as written, in the order \
+the frames appear. That text is the point of this task: these videos often \
+carry their whole content on screen, and a missed line is content lost. It \
+counts wherever it is written:
+- text cards and title slides;
+- captions and labels burned into the frame;
+- handwriting and diagram labels, on a whiteboard, a notebook, a slide or a \
+shared screen.
+
+A diagram is text to read, not scenery to describe. Transcribe its labels, \
+grouped per board or per diagram, rather than reporting that a diagram is \
+being drawn.
 
 Then, in one or two sentences, say what is physically happening on screen \
 (who or what is shown, what they are doing, the setting).
 
 Rules:
+- Transcribe the text that belongs to what this video is presenting - the \
+cards it shows, the board being explained, the slide or screen being shared. \
+Text that is only along for the ride gets ONE line naming what it is, and \
+none of its own words: a poster on the wall behind the speaker, a browser \
+tab, an app's own buttons and menus, and pasted-in screenshots of something \
+the video is not about, such as a testimonial, a comment section, a chat, or \
+someone else's post. Worked example: a video explaining two AI architectures \
+on whiteboards pastes a screenshot of a stranger's job-offer post over the \
+middle of the frame for a few seconds. The whole correct output for it is \
+one line - "overlay: a screenshot of a social post about a job offer" - and \
+not a word of the post itself. Transcribed in full, that post was the \
+largest block in this video's entire reading: paragraphs about a delivery \
+company's hiring process, and nothing about the architectures the video \
+actually teaches.
+- Never guess at an unclear value. Where a number, name or word is too \
+small, too blurred or cut off to read with confidence, write "(illegible)" \
+in its place. Do not supply a plausible one, and do not tidy several \
+figures into a round total. Worked example: a frame reading "Base: 145k, \
+Signing bonus: 20k, Relocation: 3k, Stock: 90k" was reported as round \
+six-figure sums attached to the wrong labels - not one of those numbers was \
+on screen. An invented number is indistinguishable from a real one once it \
+has been written down, and the neater it looks the more likely it is that \
+you supplied it rather than read it.
 - Report only what is visible. Never guess at what happens between frames, \
 and never infer what is being said aloud - you cannot hear this video.
-- If the same text card appears in several frames, write it once.
+- If the same text appears in several frames, write it once.
 - If a frame is a transition, blur, or blank, skip it rather than describing it.
 - No preamble and no closing remark. Start with the text you read."""
 

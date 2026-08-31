@@ -52,6 +52,18 @@ def main() -> None:
     )
     llm = chat_client(config.llm)
 
+    # The condenser gets its own client even when it is configured identically
+    # to the chat one. Sharing the `llm` client would have made pointing it
+    # elsewhere a code change; a second client built from its own endpoint
+    # makes it an `.env` edit, which is what the rest of this file already
+    # assumes about every model choice.
+    logger.info(
+        "Condenser model: %s at %s",
+        config.condenser.model,
+        config.condenser.base_url,
+    )
+    condenser_client = chat_client(config.condenser)
+
     vault = Vault(
         caption_fetcher=CompositeCaptionFetcher(
             [OEmbedCaptionFetcher(), YtDlpCaptionFetcher()]
@@ -64,7 +76,9 @@ def main() -> None:
         summarizer=ChatSummarizer(client=llm, model=config.llm.model),
         comparer=ChatComparer(client=llm, model=config.llm.model),
         item_extractor=ChatItemExtractor(client=llm, model=config.llm.model),
-        condenser=ChatContentCondenser(client=llm, model=config.llm.model),
+        condenser=ChatContentCondenser(
+            client=condenser_client, model=config.condenser.model
+        ),
         media_extractor=_build_media_extractor(config),
     )
 
