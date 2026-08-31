@@ -176,7 +176,29 @@ elbows tucked to isolate the bicep", which invents both a reason and a count \
 the speaker never gave.
 - If the input says nothing of substance - it is only a hook, a greeting, \
 music, or an unintelligible fragment - reply with an empty string rather \
-than manufacturing a summary of it."""
+than manufacturing a summary of it. An empty reply throws the whole input \
+away, so it is right only when there is genuinely nothing there to keep. \
+Before emptying, check that you cannot name one concrete thing the input \
+contains. If you can name one, condense it instead.
+- Terse, list-like, instruction-shaped phrasing is NOT a sign that an \
+input is empty - it is what real instructions sound like. Example of an \
+input to CONDENSE, not to empty: "Spicy Honey Garlic Chicken. Sweet, \
+sticky, thick and pretty. What else would you want? Now we're gonna make \
+our brine seasonings. Now put this in the fridge for at least an hour. \
+For the wet batter, make this an hour ahead of time as well. For our \
+seasoned flour, spices. Our tenderloin has been drained and dried. Plain \
+flour, wet batter, and into the seasoned flour. Press hard and \
+immediately fry your chicken. Fry for the second time for one to two \
+minutes. Let's Make our honey garlic sauce, butter, add your garlic, cook \
+it for three to four minutes, then a teaspoon of paprika, get that color. \
+Add your honey and soy sauce. A tablespoon of hot chili flakes, half a \
+teaspoon of salt. Paint your masterpiece." Every step there names \
+something a searcher would want back: a brine, an hour in the fridge, a \
+second fry of one to two minutes, honey and soy sauce, a tablespoon of \
+chili flakes, half a teaspoon of salt. That the steps are clipped, drop \
+some of their own quantities, and sit between filler ("What else would \
+you want?", "Paint your masterpiece") does not make the recipe absent. \
+Emptying that input is wrong."""
 
 COMPARE_SYSTEM_PROMPT = """\
 The user wants you to pick the best or the top few of something, out of what \

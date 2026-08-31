@@ -10,6 +10,62 @@ broke or were missing, discovered after the fact.
 
 ---
 
+## oEmbed failed on every save, and following the redirect would have crashed it
+
+**Symptom:** `oEmbed fetch failed for <url>` in the log for every single
+save, with the caption arriving from the `yt-dlp` fallback each time. Nothing
+visibly broke — a caption still came back — so this had been happening
+silently for as long as the endpoint had been redirecting.
+
+**Cause:** `OEmbedCaptionFetcher.fetch()` called `httpx.get()` without
+`follow_redirects=True`. httpx does not follow redirects by default, and
+`raise_for_status()` treats an unfollowed 3xx as an error, so a 301 landed
+straight in the `except httpx.HTTPError` arm. Instagram had started
+answering `api.instagram.com/oembed` with a 301 to the trailing-slash form.
+Every call failed on the redirect without ever reaching the endpoint.
+
+**What following it actually revealed — the reason this is two fixes, not
+one.** Measured live on 2026-08-31 across three URL shapes:
+
+```
+follow_redirects=False -> 301
+follow_redirects=True  -> 301 -> 302 -> 200, content-type text/html, 619KB
+                          <title>Instagram</title>   (the login wall)
+```
+
+The endpoint no longer returns JSON to anyone. `api.instagram.com/oembed` is
+the legacy unauthenticated endpoint Meta retired in favour of
+`graph.facebook.com/<version>/instagram_oembed`, which needs an app token
+this project does not have. So `follow_redirects=True` on its own does not
+make oEmbed work — it turns a caught `HTTPStatusError` into an **uncaught**
+`json.JSONDecodeError` from `response.json()`. Nothing upstream catches it:
+`Vault.save_reel()` calls `self._caption_fetcher.fetch(url)` bare, so the
+exception would have propagated out and killed the save outright. The "fix"
+alone would have converted a silent, working fallback into a hard failure on
+every share.
+
+**Fix:** both halves. `follow_redirects=True`, so the call reaches the
+endpoint it was aimed at; and `response.json()` wrapped so a non-JSON body
+(or a JSON payload that isn't an object) is logged and returns `None`, the
+same as any other miss, letting the scraper fallback run. The endpoint is
+kept rather than deleted: it costs one request, and it starts working again
+the day a Facebook app token is configured.
+
+**Regression tests:** `tests/test_caption_fetchers.py`. Its transport replays
+the live chain — 301 to the trailing-slash path, then the HTML login wall —
+through a real `httpx.Client`, so httpx itself decides what following a
+redirect means and what `raise_for_status` does with one it did not follow.
+The tests assert behaviour rather than the call's signature: that the request
+which finally lands is for the redirected path (this fails if the flag is
+removed — checked by reverting it), that an HTML body is a miss rather than
+an exception, and that a real oEmbed payload is still parsed.
+
+**Practical consequence:** captions come from `yt-dlp` in every case today.
+That was already true; it is now true on purpose and visible in the log
+rather than hidden behind a per-save error.
+
+---
+
 ## The summarizer sometimes credited a caption with answering a question it never addressed
 
 **Symptom:** `"how do I grow my personal brand"` against a single matched
