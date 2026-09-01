@@ -1,10 +1,23 @@
-# Status as of 2026-08-31 (evening)
+# Status as of 2026-09-01
 
-Live-testing the media pipeline (issues 01-06) against real
-Groq/Gemini/Postgres. Four things that were open this morning are now
-closed, and this file is what is still open.
+Two follow-ups from the evening session below, done the next day once Groq's
+daily cap had reset:
 
-Closed and verified this session, in the order they were done:
+- **The condenser is now measured on Groq too**, not just Gemini, so this is
+  finally one prompt against two providers rather than one provider against
+  another's old baseline. The picture got more interesting, not simpler —
+  see the new section below.
+- **The 33 live reels are re-embedded** under the new ordering.
+  `scripts/backfill_embeddings.py` (new) walks every reel and rewrites its
+  embedding from its current columns; nothing else about the row changes.
+  32 of 33 got a new embedding — the ordering changes the assembled string
+  for a media-less reel too, since a sentence transformer is not order-blind
+  even over the same bag of parts. Idempotent: a second run reports 33
+  already current.
+
+Everything below this point is the original write-up from the evening
+before. Four things that were open that morning were closed by that
+session:
 
 1. The condenser is provider-agnostic (`CONDENSER_*`), and the emptying fix
    is measured — against Gemini, because Groq had no quota left. See below,
@@ -25,6 +38,74 @@ It never showed up because every existing vault already had the extension.
 The extension statement now runs first, on its own. Found by pointing the
 live tests at a throwaway database, which is the only way anyone would hit
 it.
+
+## New: the condenser on Groq — the fix helps, and creates a new problem
+
+Measured 2026-09-01 against `openai/gpt-oss-20b`, the default, once the
+prior day's 200k-token daily cap had reset. Same transcripts, same 5-run /
+`>=4 kept` bar as the Gemini measurement. Compared against the *original*
+unfixed-prompt baseline on Groq (not against yesterday's Gemini numbers,
+which are a different model):
+
+```
+                          Groq, unfixed prompt    Groq, this prompt
+chicken recipe (713)     emptied 9/10 (WRONG)     emptied 3/5, FAILS >=4 kept
+                                                   (kept text: faithful,
+                                                    trimmed condensations —
+                                                    correct where it kept)
+Hindi interview (710)    emptied 4/10 (WRONG)     PASS, kept >= 4/5
+fragrance hook (157)     emptied 10/10 (correct)  FAILS — emptied 0/5
+"." / "Thank you."       emptied 10/10 (correct)  PASS, emptied both
+recipe-leak control      n/a                      PASS, no leak
+```
+
+**Two real improvements and one real regression, all on the same provider
+this fix was originally meant for.** The Hindi transcript — the harder of
+the two original failures, since the counter-example is an English recipe —
+is now reliably kept. The recipe itself improved from a 10% keep rate to a
+40% keep rate, real progress, but still short of the 80% bar the test holds
+it to.
+
+**The regression is the same shape as the Gemini control failure, and now
+confirmed on both measured providers.** Groq used to correctly empty the
+bare fragrance hook 10/10. With the counter-example in the prompt, it now
+keeps it every time:
+
+```
+run 1: 'five fragrances getting me compliments this summer.'
+run 2: 'five fragrances getting me compliments this summer.'
+run 3: 'five fragrances that have been getting me a lot of compliments this summer.'
+run 4: 'five fragrances getting me compliments this summer.'
+run 5: 'five fragrances getting me a lot of compliments this summer.'
+```
+
+Nothing invented — it is a faithful one-line restatement of a hook that
+named no fragrances — but a hook is exactly the case this method is
+supposed to throw away, and now it never does. Groq's version of this
+regression is worse than Gemini's: Gemini still emptied it correctly 2/5,
+Groq 0/5.
+
+**So the shape of the trade is now clear across two unrelated providers,
+which makes it a property of the fix, not of either model.** The
+counter-example (a real transcript spelled out verbatim, followed by "this
+is what condensing looks like, not emptying") teaches the model to look
+harder for something to keep — and it now finds "five fragrances" worth
+keeping in a sentence that names none. The original STATUS.md recommendation
+for exactly this outcome, written before either measurement existed: *"the
+next thing to try is a smaller counter-example — the current one is a long
+verbatim recipe, and it may be diluting the instruction it is meant to
+sharpen — or moving the empty-or-not decision out of the prompt and into
+code, since 'does this text contain a concrete noun, number or step' is
+arguably not a judgement that needs a model at all."* Both live tests
+(`test_live_a_bare_hook_is_still_emptied` on both providers) are left red
+rather than relaxed, on purpose — this is an open regression, not a
+tolerance to widen.
+
+Not decided or acted on here: which of the two remedies above to try, or
+whether to accept the trade as-is (a wrongly-kept hook costs a little
+retrieval noise; a wrongly-emptied transcript costs the content forever,
+silently). That is a real product call, not a re-measurement, and it is the
+next thing to bring to a decision — see Recommendation.
 
 ## Closed: the condenser empties real content — fixed, and measured
 
@@ -149,20 +230,27 @@ embedding entirely. The media summaries have this one path and no other.
 Tested in `tests/test_hybrid_search.py`, including that a reel with neither
 summary still assembles without an empty slot or a doubled separator.
 
-**The existing 33 reels do not benefit until they are re-embedded.** Vectors
-are stored, not recomputed, and nothing re-embeds a reel except a move or its
-video being read. So every row saved before this change still carries a
-vector built under the old order — including the 7 that overflow, which are
-exactly the ones the reorder was for. A backfill (re-embed every row from its
-current columns) would close that, and is the natural next step; it was not
-done here because it is a new piece of work, not a fix to this function.
+**Update, 2026-09-01: the existing 33 reels are now re-embedded.** Vectors
+are stored, not recomputed, so every row saved before this change kept a
+vector built under the old order until something rewrote it. This didn't
+wait for a move or a video read — `scripts/backfill_embeddings.py` (new)
+walks every reel via `known_collections()` + `find_by_collection()` (both
+already-public store methods, so no new port surface for a one-off script)
+and rewrites `embedding` from the row's own current columns. 32 of 33
+changed; the ordering changes the assembled string even for a caption-only
+reel, since a sentence transformer is not order-blind over the same bag of
+parts. Idempotent — safe to re-run any time `embedding_text` changes again.
 
 **Half of this problem is still open and is not a patch.** For the 2304-char
 reel, embedding the transcript summary *on its own* still scores 0.161
 against "how does a RAG pipeline work" — the same as the full text. A
 384-dimension MiniLM matching a natural-language question against a terse
 noun-phrase list is simply weak. Ordering cannot fix that; it is the "is
-MiniLM too weak" question, still unresolved and still deliberately untouched.
+MiniLM too weak" question, still unresolved and still deliberately
+untouched. Post-backfill, that reel moved 0.161 -> 0.214: real, and still
+nowhere near the 0.35 threshold. See "Still open" for the other reel this
+was measured against, whose score barely moved for a different reason (its
+caption is long enough to eat the token budget on its own).
 
 ## Closed: restart-resume, with a real hard kill
 
@@ -274,15 +362,25 @@ design question, not a bug fix.
 
 ## Still open
 
+- **The condenser wrongly keeps content-free hooks, on both measured
+  providers.** New today, above. Needs a decision (smaller counter-example,
+  or move the empty/keep call out of the prompt into code), not another
+  measurement — see Recommendation.
+- **Which provider the condenser should default to** is still not decided.
+  It now can be decided from real numbers on both sides rather than one
+  provider's baseline against another's fix — but "which is better" depends
+  on the answer to the point above, since both providers currently fail the
+  hook control the same way.
 - **Is MiniLM too weak?** The unresolved half of the retrieval question, and
   the same theme as the `gpt-oss-20b` note in the query-answering STATUS.
-  Deliberately untouched.
-- **Re-measure the condenser on Groq** when the daily cap resets, and decide
-  from both numbers whether to point `CONDENSER_*` somewhere else by
-  default. The comparison above is one provider against a baseline taken on
-  another; it should be one prompt against two providers.
-- **Re-embed the existing 33 reels** so the retrieval reorder actually
-  reaches them (above).
+  Deliberately untouched. The backfill (above) shows this plainly: the
+  RAG-vs-CAG reel's match score for "how does a RAG pipeline work" moved
+  0.336 -> 0.326 after re-embedding — barely, because its 1223-char caption
+  already restates the RAG steps in prose and eats most of the 256-token
+  budget on its own. The 2304-char-transcript reel moved 0.161 -> 0.214 — a
+  real gain, still nowhere near the 0.35 threshold. Reordering helped
+  exactly as much as reordering can; the ceiling is the model and the
+  256-token budget, both out of scope here.
 - **Whole-vault extract queries retrieve nothing** (above).
 - **A startup sweep for orphaned `reel-vault-*` workspaces** (above).
 - **The frame budget clusters at the end of a long reel** (above).
@@ -292,9 +390,24 @@ design question, not a bug fix.
 ## Known cost note
 
 The condense prompt roughly doubled (~343 to ~727 tokens) and runs twice per
-reel. On Groq's free tier that is a real constraint: it is why this session
-could not measure on Groq at all. It is not a problem for one save at a
-time; it would be for a backfill.
+reel. On Groq's free tier that is a real constraint: it is why the evening
+session could not measure on Groq at all, and it is unrelated to the
+regression found the next day once quota came back.
+
+## Recommendation
+
+**Decide what to do about the hook regression before touching the condenser
+prompt again.** It is confirmed on both Groq and Gemini now, so it is not a
+one-provider fluke to wait out. Two live options, both named in the original
+diagnosis: shrink the counter-example (it may be teaching "look harder" more
+than it teaches "here is what real content looks like"), or take the
+empty-or-keep decision out of the model entirely — "does this text name a
+concrete noun, number, or step" reads like a check code can make. Either one
+is a prompt/logic change with its own live-test cost, not a re-measurement,
+so it is worth deciding the approach before spending quota on it.
+
+Behind that: the provider default, which now has real data on both sides but
+no clean winner yet, since the same failure shows up on both.
 
 ## Retracted from the earlier version of this file
 
