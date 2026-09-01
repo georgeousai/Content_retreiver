@@ -48,6 +48,7 @@ from reel_vault.ports import (
     Tagger,
 )
 from reel_vault.search import embedding_text, search_terms
+from reel_vault.substance import has_substance
 from reel_vault.urls import normalize_reel_url
 
 logger = logging.getLogger(__name__)
@@ -456,8 +457,19 @@ class Vault:
 
     def _condense(self, raw: str) -> str:
         """The compact half of a piece of media text, and the only half that
-        is ever embedded."""
-        return self._condenser.condense(raw) if raw.strip() else ""
+        is ever embedded.
+
+        Text with nothing in it never reaches the model. That is a cost
+        saving rather than a correction — Whisper's `"."` on a silent clip is
+        not a judgement call, and paying twice a reel to have one made is
+        waste. Everything else is the condenser's own call, including whether
+        a hook is worth keeping, which it makes correctly once it is able to
+        answer at all: see `reel_vault.substance` and `adapters.llm`'s
+        `TruncatedResponse` for why "able to answer" was the whole problem.
+        """
+        if not has_substance(raw):
+            return ""
+        return self._condenser.condense(raw)
 
     def resume_pending_media(self) -> list[str]:
         """The reels whose video was never read, for the caller to schedule.

@@ -10,6 +10,87 @@ broke or were missing, discovered after the fact.
 
 ---
 
+## The condenser "emptied real content" — it was running out of tokens to think
+
+**Symptom:** `transcript_summary` and `frame_analysis_summary` coming back
+empty for reels whose raw text was full of substance. Measured across dozens
+of runs at temperature 0.0 on `openai/gpt-oss-20b`: a 713-character chicken
+recipe emptied 9 times in 10, a 2304-character RAG walkthrough 8 in 10, a
+710-character Hindi transcript 4 in 10. Invisible in use — the reel is still
+marked `done`, and the content is simply never searchable again.
+
+**What it looked like, for three sessions:** a model making a bad judgement
+about what was worth keeping. That reading survived because it was
+self-consistent: the condenser really is asked to return nothing for a
+transcript that carries nothing, so an empty reply looked like an answer it
+had chosen.
+
+**Actual cause:** `gpt-oss-20b` is a reasoning model. It spends completion
+tokens thinking before it writes, and on these inputs the thinking consumed
+the whole budget:
+
+```
+finish_reason:     length
+reasoning_tokens:  2046
+completion_tokens: 2048     <- the entire budget, nothing left to answer with
+content:           ''
+```
+
+`_ChatAdapter._complete` did `response.choices[0].message.content or ""` and
+returned that `""`. A truncated non-answer and a deliberate empty answer are
+byte-identical at that line, and only `finish_reason` tells them apart.
+
+Everything that had made the bug incoherent follows from this: longer
+transcripts failed more often (more to reason about), the rate "varied at
+temperature 0.0" (reasoning length drifts, and the limit is a cliff), a retry
+never helped (same input, same overflow — a retry at temp 0.0 is not an
+independent sample, and rescued 0 of the 3 cases it fired on), and a second
+provider looked fine (it does not burn a reasoning budget the same way).
+
+**Fix:** two parts, both in `adapters/llm.py`.
+
+- `reasoning_effort="low"` on the condense call. Compressing text that is
+  already known to be worth compressing is mechanical, and the deliberation
+  was the whole problem: the same answer takes 101 reasoning tokens instead
+  of 2046, and 240 completion tokens instead of 3135. A provider that does
+  not know the parameter has the call retried without it, so this stays a
+  wire-format detail rather than a per-provider code path.
+- `TruncatedResponse` raised rather than `""` returned when a reply is cut
+  off before producing any content. This applies to every adapter sharing
+  `_complete`, not just the condenser — the same silent failure in
+  `ChatSummarizer` would have looked like a slightly worse answer and would
+  never have been filed.
+
+**What the fix undid.** The judgement reading had produced real work, all of
+it now removed: a verbatim copy of the emptied recipe pasted into the prompt
+as a counter-example (~1200 characters, on a call made twice per reel), an
+"always condense, never reply empty" instruction written to take the decision
+away from the model, and a retry loop. A/B'd after the real fix, the plain
+prompt and the "always condense" prompt score identically — recipe 5/5, Hindi
+3/3, hook emptied 3/3 — so the model has its judgement back and makes it
+well. The counter-example had also caused its own regression: taught to look
+harder for something worth keeping, the model went from correctly emptying a
+content-free hook 10/10 to 0/5.
+
+**Damage repaired:** four summaries across three reels had been destroyed in
+the live vault. `scripts/recondense_media.py` rebuilt them from the stored
+`_raw` columns — which is exactly why both halves are stored — with no video
+re-downloaded, and re-embedded each one.
+
+**Regression tests:** `tests/test_truncated_response.py` pins the
+distinction with a stub client returning both shapes, so a truncated reply
+raises while a deliberate empty reply is still respected; it also pins that
+the condense call asks for shallow reasoning, and that a provider rejecting
+that parameter still works. `tests/test_condenser_prompt.py` keeps the
+measured transcripts and the live measurement behind
+`RUN_LIVE_MODEL_TESTS=1`.
+
+**The lesson:** an empty response is not an answer until `finish_reason` has
+been checked. Every measurement in the rate table above was real; the
+conclusion drawn from all of them was not.
+
+---
+
 ## oEmbed failed on every save, and following the redirect would have crashed it
 
 **Symptom:** `oEmbed fetch failed for <url>` in the log for every single

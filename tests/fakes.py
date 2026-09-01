@@ -382,15 +382,28 @@ class FakeCondenser:
     them. `raises` stands in for the API being down.
     """
 
-    def __init__(self, *, verbatim: bool = False, raises: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        verbatim: bool = False,
+        raises: bool = False,
+        empties_first: int = 0,
+    ) -> None:
         self.verbatim = verbatim
         self.raises = raises
+        # Returns "" for this many calls before behaving. Stands in for a
+        # condenser that reports nothing for a given input, whatever the
+        # reason -- a genuinely content-free transcript, or (as the
+        # truncation bug turned out to be) a reply that never arrived.
+        self.empties_first = empties_first
         self.calls: list[str] = []
 
     def condense(self, text: str) -> str:
         self.calls.append(text)
         if self.raises:
             raise RuntimeError("condenser is down")
+        if len(self.calls) <= self.empties_first:
+            return ""
         if self.verbatim:
             return text
         first = text.strip().splitlines()[0] if text.strip() else ""

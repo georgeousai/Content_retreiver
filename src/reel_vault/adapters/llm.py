@@ -20,7 +20,8 @@ import logging
 import re
 from collections.abc import Iterable
 
-from openai import OpenAI
+from openai import BadRequestError, OpenAI
+from openai.types.chat import ChatCompletion
 
 from reel_vault.config import ModelEndpoint
 from reel_vault.models import (
@@ -179,26 +180,9 @@ music, or an unintelligible fragment - reply with an empty string rather \
 than manufacturing a summary of it. An empty reply throws the whole input \
 away, so it is right only when there is genuinely nothing there to keep. \
 Before emptying, check that you cannot name one concrete thing the input \
-contains. If you can name one, condense it instead.
-- Terse, list-like, instruction-shaped phrasing is NOT a sign that an \
-input is empty - it is what real instructions sound like. Example of an \
-input to CONDENSE, not to empty: "Spicy Honey Garlic Chicken. Sweet, \
-sticky, thick and pretty. What else would you want? Now we're gonna make \
-our brine seasonings. Now put this in the fridge for at least an hour. \
-For the wet batter, make this an hour ahead of time as well. For our \
-seasoned flour, spices. Our tenderloin has been drained and dried. Plain \
-flour, wet batter, and into the seasoned flour. Press hard and \
-immediately fry your chicken. Fry for the second time for one to two \
-minutes. Let's Make our honey garlic sauce, butter, add your garlic, cook \
-it for three to four minutes, then a teaspoon of paprika, get that color. \
-Add your honey and soy sauce. A tablespoon of hot chili flakes, half a \
-teaspoon of salt. Paint your masterpiece." Every step there names \
-something a searcher would want back: a brine, an hour in the fridge, a \
-second fry of one to two minutes, honey and soy sauce, a tablespoon of \
-chili flakes, half a teaspoon of salt. That the steps are clipped, drop \
-some of their own quantities, and sit between filler ("What else would \
-you want?", "Paint your masterpiece") does not make the recipe absent. \
-Emptying that input is wrong."""
+contains. If you can name one, condense it instead. Terse, list-like, \
+instruction-shaped phrasing is what real instructions sound like, and is not \
+a reason to empty anything."""
 
 COMPARE_SYSTEM_PROMPT = """\
 The user wants you to pick the best or the top few of something, out of what \
@@ -315,23 +299,119 @@ def chat_client(endpoint: ModelEndpoint) -> OpenAI:
     return OpenAI(base_url=endpoint.base_url, api_key=endpoint.api_key)
 
 
+class TruncatedResponse(RuntimeError):
+    """The model ran out of output budget before saying anything.
+
+    Its own type because the caller must not mistake it for an answer. A
+    reasoning model spends completion tokens thinking before it writes, and
+    when the thinking alone exhausts the budget the reply comes back with
+    `finish_reason="length"` and an empty `content` — which is byte-for-byte
+    what a model deliberately saying nothing looks like.
+
+    Conflating those two cost this project days. `openai/gpt-oss-20b` emptied
+    a 713-character recipe on 9 runs in 10, and the whole of it was read as a
+    judgement the model was making about the recipe: prompts were rewritten,
+    counter-examples added and removed, two providers compared. The response
+    was truncated every time — 2046 reasoning tokens of a 2048-token budget,
+    zero tokens left to answer with. See
+    `.scratch/reel-vault-media-pipeline/STATUS.md`.
+    """
+
+
+def _is_about_reasoning_effort(error: BadRequestError) -> bool:
+    """Whether a 400 is the provider objecting to `reasoning_effort` itself.
+
+    Checked rather than assumed, because a bad request has many other causes
+    — a context length exceeded, a content filter, a model name that does not
+    exist — and retrying those without the parameter would spend a second
+    call to fail the same way, while logging something untrue about why.
+    """
+    return "reasoning_effort" in str(error)
+
+
 class _ChatAdapter:
     """Shared request boilerplate for the chat-completion adapters below."""
 
     def __init__(self, *, client: OpenAI, model: str) -> None:
         self._client = client
         self._model = model
+        # Discovered on first use rather than configured: whether a provider
+        # accepts `reasoning_effort` is a fact about the endpoint, and asking
+        # the operator to know it would be one more setting to get wrong.
+        self._reasoning_effort_unsupported = False
 
-    def _complete(self, *, system_prompt: str, user_content: str, temperature: float) -> str:
-        response = self._client.chat.completions.create(
+    def _complete(
+        self,
+        *,
+        system_prompt: str,
+        user_content: str,
+        temperature: float,
+        reasoning_effort: str | None = None,
+        empty_reply_is_meaningful: bool = False,
+    ) -> str:
+        """One chat call, with a reply cut off before it started told apart
+        from a reply that is deliberately empty.
+
+        `empty_reply_is_meaningful` is what decides which of those a caller
+        can afford to confuse. Most adapters here parse what comes back — a
+        tag list, a JSON classification — so a truncated reply is simply an
+        unparseable one, and each already degrades sensibly from that: no
+        tags, `SINGLE`, `Uncategorized`. Raising at them would turn a reel
+        saved without tags into a save that fails outright, which is worse
+        than the thing being fixed. They get a warning in the log instead.
+
+        The condenser is the exception, and the reason this distinction
+        exists: an empty reply is one of its two valid answers, so it cannot
+        tell "there was nothing in this transcript" from "I never got to
+        answer". It asks to be told.
+
+        `reasoning_effort` is passed only when a caller asks for it. A
+        provider that rejects the parameter has the call remade without it,
+        once — the answer is remembered on the instance, so this costs one
+        wasted request per process rather than one per call.
+        """
+        extra = (
+            {"reasoning_effort": reasoning_effort}
+            if reasoning_effort and not self._reasoning_effort_unsupported
+            else {}
+        )
+        try:
+            response = self._request(system_prompt, user_content, temperature, extra)
+        except BadRequestError as exc:
+            if not extra or not _is_about_reasoning_effort(exc):
+                raise
+            logger.info(
+                "%s does not accept reasoning_effort; dropping it for the "
+                "rest of this run",
+                self._model,
+            )
+            self._reasoning_effort_unsupported = True
+            response = self._request(system_prompt, user_content, temperature, {})
+
+        choice = response.choices[0]
+        content = choice.message.content or ""
+        if not content.strip() and choice.finish_reason == "length":
+            message = (
+                f"{self._model} used its whole output budget without "
+                f"answering ({len(user_content)} chars in)"
+            )
+            if empty_reply_is_meaningful:
+                raise TruncatedResponse(message)
+            logger.warning("%s; treating it as no answer", message)
+        return content
+
+    def _request(
+        self, system_prompt: str, user_content: str, temperature: float, extra: dict
+    ) -> ChatCompletion:
+        return self._client.chat.completions.create(
             model=self._model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
             temperature=temperature,
+            **extra,
         )
-        return response.choices[0].message.content or ""
 
 
 class ChatTagger(_ChatAdapter):
@@ -412,6 +492,22 @@ class ChatContentCondenser(_ChatAdapter):
         return self._complete(
             system_prompt=CONDENSE_SYSTEM_PROMPT,
             user_content=text,
+            # Compressing text that is already known to be worth compressing
+            # is mechanical, and on a reasoning model the deliberation is
+            # what breaks it: left to think as long as it likes,
+            # `gpt-oss-20b` spent 2046 tokens of a 2048-token budget
+            # reasoning about a recipe and had none left to answer with,
+            # which is the whole of the "condenser empties real content" bug.
+            # Asked for shallow reasoning it answers the same question in 101
+            # tokens, and 240 completion tokens against the 3135 the same
+            # call takes when simply given a bigger budget - a thirteenth of
+            # the cost, on a call made twice per reel against a free tier.
+            reasoning_effort="low",
+            # The one adapter that cannot read an empty reply as an answer:
+            # returning nothing is how it reports a transcript with nothing
+            # in it, so a truncated reply and a considered one are the same
+            # bytes. Being told is the whole fix for the bug above.
+            empty_reply_is_meaningful=True,
             # Nothing here is a judgement call: the job is to drop filler and
             # keep specifics, and variation between runs is only a chance to
             # drop a different fact.

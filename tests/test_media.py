@@ -255,3 +255,50 @@ def test_content_only_shown_on_screen_becomes_findable(
     answer = vault.ask("shower")
     assert isinstance(answer, SingleItemAnswer)
     assert answer.reel.url == SAVED_URL
+
+
+def test_an_artifact_transcript_never_reaches_the_condenser(
+    store: InMemoryReelStore,
+) -> None:
+    """Whether there is anything to condense is decided in code now, before
+    any model is called. Whisper's "." on a silent clip is not a judgement
+    call, and paying a model to make it was both a cost and, measurably, a
+    source of wrong answers -- see `reel_vault.substance`."""
+    condenser = FakeCondenser()
+    vault = _saved_vault(store, condenser=condenser)
+
+    vault.attach_media(URL, MediaExtraction(transcript=".", frame_analysis=FRAMES))
+
+    saved = store.find_by_url(SAVED_URL)
+    assert saved is not None
+    assert saved.transcript_summary == ""
+    # The frames had content, so they were condensed; the artifact was not
+    # sent at all.
+    assert condenser.calls == [FRAMES]
+
+
+def test_an_empty_reply_from_the_condenser_is_taken_at_its_word(
+    store: InMemoryReelStore,
+) -> None:
+    """The condenser still decides whether a hook is worth keeping, and once
+    it can answer at all it decides correctly — measured 3/3 on the vault's
+    one real hook.
+
+    So an empty reply is respected rather than retried. It was briefly
+    retried, on the theory that emptying real content was a judgement the
+    model kept getting wrong; that turned out to be a truncated response
+    misread as an answer (see `adapters.llm.TruncatedResponse`), and a retry
+    at temperature 0.0 rescued 0 of the 3 cases it fired on while costing a
+    second call every time.
+    """
+    condenser = FakeCondenser(empties_first=99)
+    vault = _saved_vault(store, condenser=condenser)
+
+    vault.attach_media(URL, MediaExtraction(transcript=TRANSCRIPT))
+
+    saved = store.find_by_url(SAVED_URL)
+    assert saved is not None
+    assert condenser.calls == [TRANSCRIPT]
+    assert saved.transcript_summary == ""
+    # The words are kept regardless, so a summary given up on is recoverable.
+    assert saved.transcript_raw == TRANSCRIPT

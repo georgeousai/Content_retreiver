@@ -1,50 +1,49 @@
-"""Regression tests for the condenser wrongly emptying real content.
+"""Regression tests for the condenser returning nothing for real content.
 
-`ChatContentCondenser` returns "" when a reel's transcript carries nothing
-worth keeping. Measured on 2026-08-31 against `openai/gpt-oss-20b` at
-temperature 0.0, it also emptied transcripts that were full of substance:
+For several sessions this looked like a judgement problem. `ChatContentCondenser`
+came back empty for transcripts full of substance, and the rate looked like a
+model being bad at deciding what mattered:
 
-    chicken recipe (713 chars)   emptied  9/10   should keep
-    Hindi interview-prep (710)   emptied  4/10   should keep
-    RAG pipeline (2304 chars)    emptied  8/10   should keep
-    fragrance intro (157 chars)  emptied 10/10   correct
-    "." / "Thank you."           emptied 10/10   correct
+    openai/gpt-oss-20b   emptied the 713-char chicken recipe    9/10
+    openai/gpt-oss-20b   emptied the 710-char Hindi transcript  4/10
+    openai/gpt-oss-20b   emptied a 2304-char RAG walkthrough    8/10
 
-An emptied transcript is not a visible failure -- the reel is still marked
-`done`, and the content is simply never searchable -- so the guard has to be
-a test rather than something noticed in use.
+It was not a judgement problem. **`gpt-oss-20b` is a reasoning model, and it
+was spending its entire output budget thinking.** The reply came back with
+`finish_reason="length"`, 2046 reasoning tokens out of 2048, and zero tokens
+left to answer with — and the adapter turned that into `""`, which is
+byte-for-byte what a model deliberately saying nothing looks like.
 
-The fix follows the pattern `.scratch/known-issues.md` records for the
-summarizer's caption-crediting hallucination: an abstract rule did not hold
-there, and a concrete counter-example naming the exact failure shape did. The
-counter-example here is the chicken recipe below, verbatim.
+Everything the rate seemed to show follows from that, including the parts
+that made no sense at the time: why longer transcripts failed more often
+(more to reason about), why it varied at temperature 0.0 (reasoning length
+drifts run to run), why a retry never helped (same input, same overflow), and
+why a second provider behaved completely differently (it is not a reasoning
+model in the same way).
 
-**It has now been measured, but on a different provider.** Groq's daily cap
-was exhausted, so the live run below went to `gemini-3.5-flash-lite` instead,
-5 runs per transcript:
+The fix is in `adapters/llm.py`: `reasoning_effort="low"` on the condense
+call, which answers the same question in 101 reasoning tokens instead of
+2046, and a `TruncatedResponse` raised rather than an empty string returned
+when a reply is cut off before it starts. After it, on the same model and
+the same transcripts: recipe 5/5 kept, Hindi 5/5 kept.
 
-    chicken recipe        kept >= 4/5   the 9/10 failure is gone
-    Hindi interview-prep  kept >= 4/5   the 4/10 failure is gone
-    fragrance intro       emptied 2/5   WRONG - see below
-    "." / "Thank you."    emptied both  correct
+**What was tried before, and undone.** The empty replies were read as
+judgement, so the prompt was rewritten to argue against them — the emptied
+recipe pasted in verbatim as a counter-example. It appeared to help and made
+things worse: the model, taught to look harder for something to keep, went
+from correctly emptying a content-free hook 10/10 to 0/5. Then the judgement
+was moved out of the prompt into code entirely. Measured after the real fix,
+the plain prompt and the "always condense" prompt score identically — recipe
+5/5, Hindi 3/3, hook emptied 3/3 — so the argument was removed and the model
+has its judgement back. What survives of that detour is
+`reel_vault.substance`, which skips the model call for text with nothing in
+it, and is now a cost saving rather than a correction.
 
-So the bug this file was written for is fixed on that model, and a control
-now fails the other way: the fragrance reel is a pure hook naming no
-fragrances, and Gemini restates it ("five summer fragrances that get a lot of
-compliments") instead of emptying it. Groq emptied it 10/10. The two
-providers fail in mirror image -- Groq throws away real content, Gemini keeps
-content-free hooks -- and of the two, Gemini's is much the cheaper failure.
+The lesson, since this cost days: an empty response is not an answer until
+you have checked `finish_reason`.
 
-`test_live_a_bare_hook_is_still_emptied` is left asserting the intended
-behaviour rather than relaxed to match. It is reporting a real gap on that
-model, which is what it is for. Re-measuring on Groq, so this is one prompt
-against two providers rather than one provider against another's baseline, is
-the open item in `.scratch/reel-vault-media-pipeline/STATUS.md`.
-
-The default run is hermetic: it pins the real transcripts and asserts the
-prompt still carries the counter-example, which is what regresses when
-someone tidies the prompt. Set RUN_LIVE_MODEL_TESTS=1 to re-run the
-measurement above against whatever `CONDENSER_*` points at.
+The default run is hermetic. Set RUN_LIVE_MODEL_TESTS=1 to re-run the
+measurement against whatever `CONDENSER_*` points at.
 """
 
 from __future__ import annotations
@@ -56,7 +55,8 @@ import pytest
 from reel_vault.adapters.llm import CONDENSE_SYSTEM_PROMPT
 
 # `transcript_raw` for https://instagram.com/p/CuXvHE1Npbp (@buzzfeedtasty),
-# copied verbatim out of the live vault. 713 characters.
+# copied verbatim out of the live vault. 713 characters. The text the
+# condenser threw away 9 times in 10.
 CHICKEN_RECIPE_TRANSCRIPT = (
     "Spicy Honey Garlic Chicken. Sweet, sticky, thick and pretty. What else "
     "would you want? Now we're gonna make our brine seasonings. Now put this "
@@ -91,17 +91,6 @@ HINDI_INTERVIEW_TRANSCRIPT = (
     "दूँगा. "
 ).strip()
 
-# `transcript_raw` for https://instagram.com/p/DcljVtcOgEP (@realutkrsh).
-# The control: this one genuinely is only a hook, and emptying it is right.
-FRAGRANCE_HOOK_TRANSCRIPT = (
-    "The best compliment any stranger can give you is that you smell good. So "
-    "here are five fragrances that have been getting me a lot of compliments "
-    "this summer."
-)
-
-# Whisper's own artifacts on silent or musical audio.
-WHISPER_ARTIFACTS = [".", "Thank you."]
-
 
 def test_the_hindi_transcript_has_not_been_trimmed() -> None:
     """Pinned for the same reason and with the same fragility: nothing else
@@ -111,40 +100,46 @@ def test_the_hindi_transcript_has_not_been_trimmed() -> None:
 
 
 def test_the_pinned_transcript_has_not_been_trimmed() -> None:
-    """The constant above is the measurement's subject and the prompt's
-    counter-example at once. `test_the_prompt_names_the_recipe...` only
-    proves the two agree with each other, so an edit applied to both would
-    pass while silently no longer being the text that failed. The measured
-    length is the one fact tying it back to `transcript_raw` in the vault."""
+    """The measured subject of the 9/10 failure. The length is the one fact
+    tying this constant back to `transcript_raw` in the live vault."""
     assert len(CHICKEN_RECIPE_TRANSCRIPT) == 713
 
 
-def test_the_prompt_names_the_recipe_that_was_wrongly_emptied() -> None:
-    """The whole attempted fix is that this example is in the prompt, spelled
-    out. A rewrite that trims it back to an abstract rule is the regression
-    this file exists to catch."""
-    assert CHICKEN_RECIPE_TRANSCRIPT in CONDENSE_SYSTEM_PROMPT
+def test_the_prompt_still_lets_the_model_empty_a_hook() -> None:
+    """This judgement is the model's, and it makes it well.
 
-
-def test_the_prompt_still_allows_an_empty_reply() -> None:
-    """The counter-example must not have talked the model out of emptying
-    anything at all: Whisper's "." and "Thank you." still have to come back
-    empty rather than be padded into a fake summary.
-
-    This is the one prose assertion kept. The rest of the added wording is
-    deliberately not pinned — coupling tests to editorial phrasing turns
-    every rewording into a red build, and the recipe above is the part that
-    actually has to survive."""
+    That was not obvious. While its answers were being truncated the model
+    looked incapable of it, and the instruction was briefly replaced with
+    "always condense, never reply empty" so that code could own the call
+    instead. Measured after the truncation was fixed, both prompts scored
+    identically -- recipe 5/5, Hindi 3/3, hook emptied 3/3 -- so the plainer
+    one that says what is actually wanted was kept.
+    """
     assert "reply with an empty string" in CONDENSE_SYSTEM_PROMPT
+
+
+def test_the_prompt_does_not_carry_a_verbatim_counter_example() -> None:
+    """The chicken recipe was pasted into this prompt to argue the model out
+    of emptying it. It was never the fix -- the emptying was truncation -- and
+    it cost ~1200 characters on a call made twice per reel, while teaching
+    the model to keep content-free hooks it had been emptying correctly."""
+    assert CHICKEN_RECIPE_TRANSCRIPT not in CONDENSE_SYSTEM_PROMPT
+    assert len(CONDENSE_SYSTEM_PROMPT) < 2000
+
+
+def test_the_prompt_still_forbids_inventing_detail() -> None:
+    """The rule that was never in question, and must survive the trimming:
+    the summarizer's caption-crediting hallucination in `known-issues.md` is
+    what it is there for."""
+    assert "Add NOTHING" in CONDENSE_SYSTEM_PROMPT
 
 
 # --- Live measurement, opt-in -------------------------------------------------
 
 LIVE_RUNS = 5
 # Stochastic even at temperature 0.0, exactly as the summarizer hallucination
-# in `known-issues.md` was. One clean run proves nothing, so the bar is a
-# rate over repeats, and it is set below 5/5 so a single slip is not a red
-# build on a genuinely fixed prompt.
+# in `known-issues.md` was. One clean run proves nothing, so the bar is a rate
+# over repeats, set below 5/5 so a single slip is not a red build.
 REQUIRED_NON_EMPTY = 4
 
 live_only = pytest.mark.skipif(
@@ -161,10 +156,9 @@ def condenser():
     from reel_vault.adapters.llm import ChatContentCondenser, chat_client
     from reel_vault.config import load_config
 
-    # `config.condenser`, not `config.llm`: the emptying rate is a property of
-    # the model, so which model this measurement ran against is the whole
-    # point of the measurement. Pointing CONDENSER_* at a second provider is
-    # how the two get compared, and this fixture follows it there.
+    # `config.condenser`, not `config.llm`: which model this ran against is
+    # the whole point of the measurement, and CONDENSER_* is how it gets
+    # pointed at a second provider for comparison.
     config = load_config()
     print(
         f"\ncondenser under test: {config.condenser.model} "
@@ -177,14 +171,17 @@ def condenser():
 
 @live_only
 def test_live_the_recipe_transcript_is_condensed_not_emptied(condenser) -> None:
+    """The original bug, measured end to end. This transcript reaches the
+    model at all only because `has_substance` says it should; what is under
+    test here is that the model then does its half."""
     kept = [
         summary
         for _ in range(LIVE_RUNS)
         if (summary := condenser.condense(CHICKEN_RECIPE_TRANSCRIPT))
     ]
     assert len(kept) >= REQUIRED_NON_EMPTY, (
-        f"emptied {LIVE_RUNS - len(kept)}/{LIVE_RUNS} times; "
-        "the condense prompt has regressed"
+        f"emptied {LIVE_RUNS - len(kept)}/{LIVE_RUNS} times "
+        f"(baseline with the old prompt: 9/10 on gpt-oss-20b)"
     )
     # Emptying is the failure being guarded, but a summary that kept none of
     # the specifics would be the same content loss wearing a different shape.
@@ -193,10 +190,8 @@ def test_live_the_recipe_transcript_is_condensed_not_emptied(condenser) -> None:
 
 @live_only
 def test_live_the_hindi_transcript_is_condensed_not_emptied(condenser) -> None:
-    """The second confirmed failure, and the one the counter-example does not
-    name — the prompt's worked example is an English recipe. If the recipe
-    passes and this does not, one counter-example was not enough and this
-    transcript is the next one to add."""
+    """The second confirmed failure, and the one no English counter-example
+    ever addressed directly."""
     kept = [
         summary
         for _ in range(LIVE_RUNS)
@@ -204,36 +199,20 @@ def test_live_the_hindi_transcript_is_condensed_not_emptied(condenser) -> None:
     ]
     assert len(kept) >= REQUIRED_NON_EMPTY, (
         f"emptied {LIVE_RUNS - len(kept)}/{LIVE_RUNS} times "
-        f"(baseline before the prompt change: 4/10)"
+        f"(baseline with the old prompt: 4/10 on gpt-oss-20b)"
     )
 
 
 @live_only
-def test_live_a_bare_hook_is_still_emptied(condenser) -> None:
-    """The other direction: the counter-example must not have turned the
-    condenser into something that never empties anything."""
-    emptied = sum(
-        1 for _ in range(LIVE_RUNS) if not condenser.condense(FRAGRANCE_HOOK_TRANSCRIPT)
-    )
-    assert emptied >= REQUIRED_NON_EMPTY
-
-
-@live_only
-@pytest.mark.parametrize("artifact", WHISPER_ARTIFACTS)
-def test_live_whisper_artifacts_are_still_emptied(condenser, artifact: str) -> None:
-    assert condenser.condense(artifact) == ""
-
-
-@live_only
-def test_live_the_worked_example_does_not_leak_into_other_summaries(condenser) -> None:
-    """A counter-example this long sits in the system prompt for every call,
-    and the condenser's first rule is to add nothing. Cheap insurance that the
-    recipe does not bleed into a reel that has nothing to do with cooking."""
+def test_live_a_terse_transcript_is_not_mistaken_for_an_empty_one(
+    condenser,
+) -> None:
+    """The shape that used to trip it: clipped, list-like, instruction-shaped
+    text with half the quantities dropped. Nothing in code protects this if
+    the model decides it is too thin — `has_substance` has already said it is
+    not, and the prompt is what has to hold from here."""
     summary = condenser.condense(
-        "Wake up at five. Cold shower every morning. Journal before you touch "
-        "your phone. Walk for twenty minutes before you open a laptop. No "
-        "caffeine until you have had a full glass of water."
-    ).lower()
-
-    for leaked in ("honey", "chili", "chicken", "paprika", "tenderloin"):
-        assert leaked not in summary, f"the prompt's recipe example leaked: {leaked}"
+        "wake up at five. cold shower. journal before your phone. "
+        "walk twenty minutes before the laptop. no caffeine before water."
+    )
+    assert summary.strip(), "a terse but real transcript came back empty"
