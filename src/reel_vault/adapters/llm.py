@@ -483,6 +483,28 @@ class ChatItemExtractor(_ChatAdapter):
             system_prompt=EXTRACT_SYSTEM_PROMPT,
             user_content=_question_with_sources(query, sources),
             temperature=0.0,
+            # Measured truncating on real vault content, and silently: at 9
+            # reels of media-rich text it spent all 2046 available reasoning
+            # tokens and returned nothing, `_parse_items` turned that into
+            # `[]`, and the user got an empty compilation that looked like an
+            # answer. Asked for shallow reasoning on the same input it uses
+            # 737 and returns 14 items.
+            #
+            # Only this adapter, and not the comparer or summarizer beside
+            # it, because only this one was measured to need it: on the same
+            # 9 reels the comparer used 665 reasoning tokens and the
+            # summarizer 916. Enumerating *every* item across many sources is
+            # combinatorially harder than picking a winner out of them, so
+            # the task shape rather than the input size is what runs the
+            # budget out.
+            #
+            # "low" rather than "medium" is untested: the daily token cap ran
+            # out before that comparison could be made. Low is known to fix
+            # the truncation, and a degraded-but-complete list beats an empty
+            # one presented as an answer, so it ships as the safe end of the
+            # range. Whether medium clears the budget too, and reads the
+            # sources any better for it, is an open question.
+            reasoning_effort="low",
         )
         return _parse_items(content)
 

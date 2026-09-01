@@ -190,3 +190,61 @@ def test_a_parsing_adapter_degrades_instead_of_raising() -> None:
     )
 
     assert tagger.tag("a caption") == []
+
+
+# --- which adapters ask for shallow reasoning, and why ------------------------
+
+def test_the_item_extractor_asks_for_shallow_reasoning() -> None:
+    """Measured truncating on real vault content, and silently.
+
+    Audited 2026-09-01 against `openai/gpt-oss-20b` on the live vault's
+    media-rich reels. At 9 reels (14270 characters of source text) it spent
+    all 2046 reasoning tokens available to it and returned no content;
+    `_parse_items` turned that into `[]`, and a compilation question came
+    back empty looking exactly like a genuine "nothing found". With shallow
+    reasoning, the same input uses 737 tokens and returns 14 items.
+    """
+    from reel_vault.adapters.llm import ChatItemExtractor
+    from reel_vault.models import SummarySource
+
+    client = _StubClient('["a", "b"]', "stop")
+    extractor = ChatItemExtractor(
+        client=client,  # type: ignore[arg-type]
+        model="test-model",
+    )
+
+    extractor.extract_items("list the tools", [SummarySource(caption="a caption")])
+
+    assert client.calls[0]["reasoning_effort"] == "low"
+
+
+@pytest.mark.parametrize(
+    "adapter_name, call",
+    [
+        ("ChatSummarizer", lambda a: a.summarize("q", [])),
+        ("ChatComparer", lambda a: a.compare("q", [])),
+    ],
+)
+def test_the_other_aggregate_adapters_are_left_alone(adapter_name, call) -> None:
+    """Deliberately not given the same treatment, because they were measured
+    not to need it.
+
+    On the identical 9 reels that exhausted the extractor's budget, the
+    comparer used 665 reasoning tokens and the summarizer 916, both finishing
+    normally with full answers. Enumerating every item across many sources is
+    combinatorially harder than ranking them, so it is the task shape and not
+    the prompt size that runs the budget out — and turning reasoning down on
+    a synthesis task that is working is how a cost saving becomes a worse
+    answer.
+    """
+    import reel_vault.adapters.llm as llm
+
+    client = _StubClient('{"criterion": "c", "answer": "a"}', "stop")
+    adapter = getattr(llm, adapter_name)(
+        client=client,  # type: ignore[arg-type]
+        model="test-model",
+    )
+
+    call(adapter)
+
+    assert "reasoning_effort" not in client.calls[0]

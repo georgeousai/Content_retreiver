@@ -85,6 +85,26 @@ that parameter still works. `tests/test_condenser_prompt.py` keeps the
 measured transcripts and the live measurement behind
 `RUN_LIVE_MODEL_TESTS=1`.
 
+**The same bug, found once more by looking for it.** Since nothing guaranteed
+the condenser was the only adapter affected, all six sharing `_complete` were
+measured against real vault data. Five were fine. `ChatItemExtractor` was
+not: on the vault's media-rich reels it spent all 2046 available reasoning
+tokens and returned nothing, at 6 reels and again at 9.
+
+That one failed in the *answer* path rather than the storage path, which
+makes it worse to detect. `_parse_items` turns an empty reply into `[]`, so a
+"compile everything that..." question came back with no items and read as a
+genuine "nothing found". Fixed the same way, `reasoning_effort="low"`: the
+same 9 reels then use 737 reasoning tokens and return 14 items.
+
+Deliberately not applied to the summarizer or comparer beside it. On the
+identical input they used 916 and 665 reasoning tokens and answered fully —
+enumerating every item across many sources is combinatorially harder than
+ranking them, so it is the task shape, not the prompt size, that runs the
+budget out. Lowering reasoning on a synthesis task that works is how a cost
+saving turns into a worse answer. `tests/test_truncated_response.py` pins
+both the fix and that deliberate omission.
+
 **The lesson:** an empty response is not an answer until `finish_reason` has
 been checked. Every measurement in the rate table above was real; the
 conclusion drawn from all of them was not.

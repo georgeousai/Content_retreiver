@@ -152,6 +152,69 @@ a rate table measured over dozens of runs all sat downstream of one
 unchecked field. Every measurement in that table was real; the conclusion
 drawn from it was not.
 
+## The adapter audit — one more was truncating, silently
+
+The condenser's bug was found because it left a visible mark: an empty
+column beside a full one. Nothing guaranteed it was the only adapter
+affected, so all six that share `_complete` were measured against real vault
+data on `openai/gpt-oss-20b`.
+
+**First pass, the vault's first 15 reels (11881 chars of source text): none
+truncated.**
+
+```
+adapter                  finish   prompt  compl  reason  answer
+ChatTagger               stop        292    147     116      96
+ChatQueryIntent          stop        788    114      90      60
+ChatCollectionAssigner   stop       1007    230     209      59
+ChatSummarizer           stop       3662   1188     777    1859
+ChatComparer             stop       3428    689     566     493
+ChatItemExtractor        stop       3325   1199    1160      81
+```
+
+That looked like a clean bill of health and was not one. Most reels in this
+vault have never been through the media pipeline, so those 15 were thin.
+Re-run against the vault's *media-rich* reels — what every reel looks like
+once the backlog is processed — `ChatItemExtractor` fell off the same cliff:
+
+```
+source text   reels   finish     prompt   reasoning   items returned
+11568c            6   length       3069        2046        0   <- truncated
+14270c            9   length       3803        2046        0   <- truncated
+14270c            9   stop         3803         737       14   with low effort
+```
+
+**And it failed silently, in the answer path rather than the storage one.**
+`_parse_items` turns an empty reply into `[]`, so a compilation question came
+back with no items and looked exactly like a genuine "nothing found". A user
+would have read that as an answer.
+
+**Fixed for the extractor only**, with `reasoning_effort="low"`, because
+only the extractor was measured to need it. On the identical 9 reels the
+comparer used 665 reasoning tokens and the summarizer 916, both finishing
+normally with full answers. The difference is the task, not the prompt size:
+enumerating *every* item across many sources is combinatorially harder than
+ranking them or writing a paragraph about them. Turning reasoning down on a
+synthesis task that is working is how a cost saving becomes a worse answer,
+so the other two were left alone.
+
+Pinned in `tests/test_truncated_response.py`, including the negative case —
+that the summarizer and comparer are deliberately *not* given the same
+setting, with the measurement that justifies leaving them.
+
+**Open:** whether `"medium"` would clear the budget too, and read the sources
+better than `"low"` for it. Groq's 200k daily cap ran out before that
+comparison could be run. Low is the safe end of the range and is known to fix
+the truncation, so it ships; medium is worth an hour when quota allows.
+
+**Not a regression, but worth stating plainly:** an earlier session recorded
+this extractor returning 5 correctly paired items ("Maison Margiela Never
+Ending Summer") where today's run returned the brand and product as 10
+separate entries. That is *not* evidence about reasoning effort — the
+earlier run was against `gemini-3.5-flash-lite`, because Groq was capped at
+the time, and today's was `gpt-oss-20b`. Two different models. The
+comparison that would mean something has not been run.
+
 ## The two follow-ups that started the day
 
 Both done, before the above came to light:
@@ -524,15 +587,16 @@ design question, not a bug fix.
 
 ## Still open
 
-- **Check the other adapters for the same truncation.** The condenser was
-  found by accident; `ChatSummarizer`, `ChatComparer`, `ChatItemExtractor`,
-  `ChatTagger`, `ChatQueryIntent` and `ChatCollectionAssigner` all run on the
-  same reasoning model through the same `_complete`. They now raise
-  `TruncatedResponse` instead of silently returning "" — that part is fixed
-  for all of them — but none has been given `reasoning_effort`, and nobody
-  has measured how often they truncate. The summarizer is the obvious
-  suspect: it reads up to 15 reels into one prompt, so it has the most to
-  reason about. **This is the first thing to do next.**
+- **`reasoning_effort="medium"` on the item extractor, untested.** Low fixes
+  the measured truncation and ships; whether medium clears the budget too and
+  reads the sources better for it is unmeasured, because the daily cap ran
+  out. See the audit above.
+- **Whole-vault extract queries still retrieve nothing.** Now more annoying
+  than before: the extractor itself is fixed and measurably works on nine
+  reels at once, but `ask` rarely routes that many to it. "Compile every tool
+  and website my reels mention" still returns `NoMatch`, because retrieval is
+  similarity-first and that query resembles no particular reel. The
+  extractor is no longer the bottleneck; retrieval is.
 - **Is MiniLM too weak?** The unresolved half of the retrieval question, and
   the same theme as the `gpt-oss-20b` note in the query-answering STATUS.
   Deliberately untouched. The backfill (above) shows this plainly: the
@@ -548,7 +612,6 @@ design question, not a bug fix.
   columns, so it never re-downloads a video. It has been run once, repairing
   the four summaries the truncation destroyed (see below); it is listed here
   because it will be worth running again after the adapter audit above.
-- **Whole-vault extract queries retrieve nothing** (above).
 - **A startup sweep for orphaned `reel-vault-*` workspaces** (above).
 - **The frame budget clusters at the end of a long reel** (above).
 - **Per-user separation** — still the architectural decision the
@@ -584,16 +647,23 @@ this file exhausted it twice. That constraint is largely gone.
 
 ## Recommendation
 
-**Audit the other adapters for the same truncation, starting with the
-summarizer.** The condenser's version of this bug was found only because it
-had a visible symptom — an empty column somebody noticed. The same silent
-failure in `ChatSummarizer` would look like a slightly worse answer, and
-nobody would ever file it. `TruncatedResponse` now makes it loud rather than
-silent, which is the safety net; measuring the rate and setting
-`reasoning_effort` where it helps is the actual work, and it is cheap now
-that the cost per call has dropped.
+**The truncation family is closed; retrieval is now the binding constraint.**
+Both instances of it are found and fixed, the audit covered all six adapters
+that could have had it, and `TruncatedResponse` plus a warning covers the
+ones left at default effort if they ever start.
 
-Then re-condense the four reels whose summaries this bug destroyed.
+What is left in the way of good answers is retrieval, and it is the same
+problem in two shapes. A question that names no reel in particular
+("every tool my reels mention") matches nothing, so a working extractor is
+handed an empty list. And a question that does match still scores its best
+sources below threshold, because a 384-dimension MiniLM against a
+natural-language question is weak — 0.214 for a reel whose transcript answers
+the question almost word for word.
+
+Those are the same decision: whether the embedding model is good enough, and
+whether similarity should be the only route into an aggregate query. It is
+the "is MiniLM too weak" question the last three sessions have deferred, and
+nothing smaller is now blocking anything.
 
 ## Retracted from the earlier version of this file
 
