@@ -1,4 +1,97 @@
-# Status as of 2026-09-01
+# Status as of 2026-09-02
+
+## "Is MiniLM too weak?" — mostly no, and the real fix was the threshold
+
+The question every prior session in this file deferred, finally actually
+investigated rather than assumed. Short answer: the embedding model is not
+the problem. A single flat similarity threshold, calibrated before the
+retrieval reorder and the embedding backfill existed, was.
+
+**The evaluation.** 17 hand-phrased, realistic queries against the live
+vault's 33 reels — paraphrased away from the source text's own vocabulary on
+purpose, so the test is "does the model understand what I mean" rather than
+"does it find its own words echoed back." Run through the real production
+path (`PostgresReelStore.search`, vector search merged with the keyword arm,
+exactly as `vault.ask` uses it), local embedder, no API calls.
+
+```
+16/17 cleared the 0.35 threshold.
+8/9 among reels the media pipeline had actually processed.
+8/8 among reels with only a substantive caption.
+```
+
+That is a far better hit rate than the "0.161, 0.214, nowhere near 0.35"
+framing in this file's earlier entries suggested. Those earlier numbers were
+real, but they were two specific, unusually hard cases (a reel with an
+unusually long caption eating the token budget; a reel competing with a
+second reel on the exact same topic) generalized into "the model is weak" —
+a conclusion the broader test does not support.
+
+**The one miss was not the model failing to understand the question.**
+"How does a RAG pipeline work" scored 0.326 against the RAG-vs-CAG reel — a
+real miss at 0.35. But the *top-ranked* result for that same query was a
+different reel, also genuinely about RAG, at 0.340 — also under the old
+threshold. Two legitimate answers to one broad question, splitting the
+similarity mass between them, both landing just under the line. That is a
+threshold calibration problem, not a semantic one: the model correctly
+identified both as relevant and separated them cleanly from everything
+irrelevant (the next-best score was 0.267).
+
+**Checked before touching anything: would a lower threshold let wrong
+answers through?** 6 adversarial queries with no correct answer anywhere in
+this vault (a flat tire, pizza toppings, potty-training a puppy, planting
+tomatoes, an oil change, guitar chords) — chosen to sit outside every
+collection this vault has. Worst score reached across all of them, against
+all 33 reels: **0.198**.
+
+```
+threshold 0.35:  16/17 real queries succeed,  0/6 false matches
+threshold 0.32:  17/17 real queries succeed,  0/6 false matches
+threshold 0.30:  17/17 real queries succeed,  0/6 false matches
+threshold 0.28:  17/17 real queries succeed,  0/6 false matches
+```
+
+A 0.10-0.15 gap between the noise ceiling and any threshold that rescues the
+miss. Not a coin flip.
+
+**Fix:** `DEFAULT_MATCH_THRESHOLD` moved from 0.35 to 0.30 —
+`src/reel_vault/vault.py`. Landed on 0.30 rather than 0.32 (the minimum that
+rescues the miss) specifically for the margin: 0.32 clears the case that
+failed by 0.006, which is not a number worth trusting to hold as the vault
+grows; 0.30 leaves real room above the measured noise ceiling.
+
+Verified live, post-change: the query now returns both legitimate RAG reels
+(0.340, 0.326), where it previously returned none.
+
+**Regression-tested without depending on a database that will keep
+changing.** The full 17-query, 6-adversarial-query evaluation used the live
+vault's current content and cannot be re-run automatically without drifting
+as reels are added, moved, or re-embedded — so it lives here, as a record,
+not as a test. What *is* pinned, in `tests/test_retrieval_threshold.py`: the
+two real reels from the miss, frozen verbatim, embedded through the real
+local model (not the bag-of-words fake the rest of the suite uses — the
+whole question is the real model's real score against a real threshold),
+scored the identical 0.326 and 0.340 the live evaluation measured. If a
+future change regresses this specific case, that is where it will be caught.
+
+**One thing noticed while freezing the test data, unrelated to this fix and
+not acted on:** the RAG-vs-CAG reel's stored `frame_analysis_summary` still
+reads "compensation over $200,000" — the exact fabrication the vision prompt
+fix (see the whiteboard section, days earlier) was written to stop. It
+predates that fix and was never retroactively reprocessed; only reels
+analyzed after the fix benefit from it. A repair pass analogous to
+`recondense_media.py` — re-run frame analysis on reels saved before the
+vision-prompt fix — would close this, and is new work, not done here. Filed
+under "Still open."
+
+**What "is MiniLM too weak" question remains, now narrower.** Two real
+limits, neither fixed by the threshold: a reel whose caption is long enough
+to eat the whole 256-token embedding budget on its own (still true,
+unrelated to this evaluation), and — genuinely open — whether a vault with
+many reels on the same narrow topic will keep splitting similarity mass
+finely enough to need this margin revisited as it grows past 33 reels. The
+broad claim that the model itself is inadequate is retired; watch the
+narrow one.
 
 ## The condenser bug is solved, and it was never what it looked like
 
@@ -597,16 +690,23 @@ design question, not a bug fix.
   and website my reels mention" still returns `NoMatch`, because retrieval is
   similarity-first and that query resembles no particular reel. The
   extractor is no longer the bottleneck; retrieval is.
-- **Is MiniLM too weak?** The unresolved half of the retrieval question, and
-  the same theme as the `gpt-oss-20b` note in the query-answering STATUS.
-  Deliberately untouched. The backfill (above) shows this plainly: the
-  RAG-vs-CAG reel's match score for "how does a RAG pipeline work" moved
-  0.336 -> 0.326 after re-embedding — barely, because its 1223-char caption
-  already restates the RAG steps in prose and eats most of the 256-token
-  budget on its own. The 2304-char-transcript reel moved 0.161 -> 0.214 — a
-  real gain, still nowhere near the 0.35 threshold. Reordering helped
-  exactly as much as reordering can; the ceiling is the model and the
-  256-token budget, both out of scope here.
+- **A reel whose caption alone eats the 256-token embedding budget.** The
+  narrower thing left of "is MiniLM too weak" after the threshold fix
+  (above). The 1223-char-caption reel's summary still gets partially
+  truncated regardless of ordering, because the caption by itself is most of
+  the budget. Ordering cannot fix that; it would need either a larger
+  embedding model or a higher token ceiling, both bigger changes than this
+  session made.
+- **Whether the 0.30 threshold holds as the vault grows past 33 reels.**
+  More reels on the same narrow topic split similarity mass more finely, the
+  same way the two RAG reels did. Not a known problem yet — just the
+  condition that would eventually reopen this.
+- **The RAG-vs-CAG reel's frame analysis still has the pre-fix fabrication**
+  ("compensation over $200,000"). Noticed while writing the threshold
+  regression test, not fixed: it was analyzed before the vision-prompt fix
+  and never reprocessed. A repair pass analogous to `recondense_media.py`
+  would close it — re-run frame analysis on every reel saved before that
+  fix — and is new work.
 - **Re-condense any reel this bug emptied, when a prompt changes.**
   `scripts/recondense_media.py` (new) does it from the stored `_raw`
   columns, so it never re-downloads a video. It has been run once, repairing

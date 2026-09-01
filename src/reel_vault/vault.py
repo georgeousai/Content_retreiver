@@ -53,7 +53,19 @@ from reel_vault.urls import normalize_reel_url
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MATCH_THRESHOLD = 0.35
+# Lowered from 0.35 on 2026-09-02. Measured against the real embedder and
+# the live vault's 33 reels: 17 realistic queries plus 6 adversarial ones
+# ("how do I fix a flat tire") that nothing in the vault should answer. At
+# 0.35, one real query missed its correct reel by 0.024 (two legitimate
+# answers to a broad question split the similarity mass between them); at
+# 0.30, all 17 succeed and the worst adversarial score stays at 0.198 -- a
+# comfortable margin, not a hair's breadth. Full numbers and the reasoning
+# behind picking 0.30 specifically (not 0.32 or 0.28) are in
+# .scratch/reel-vault-media-pipeline/STATUS.md; the one case that actually
+# failed is pinned in tests/test_retrieval_threshold.py against the real
+# local model, since a database that keeps changing cannot be the thing this
+# regression test depends on.
+DEFAULT_MATCH_THRESHOLD = 0.30
 
 # One cap per intent, not one shared cap: a list costs only a database read, so
 # it can be generous, while every reel in an aggregate becomes part of a single

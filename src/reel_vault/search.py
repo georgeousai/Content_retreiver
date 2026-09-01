@@ -20,7 +20,7 @@ from reel_vault.models import SavedReel
 # A keyword hit is strong evidence but not proof: the vault filed this reel
 # under a name the query used. Scaling coverage by this keeps a full-coverage
 # keyword match (0.8) below a near-perfect semantic match while leaving a
-# half-coverage one (0.4) above the default 0.35 threshold.
+# half-coverage one (0.4) above the default 0.30 threshold.
 KEYWORD_WEIGHT = 0.8
 
 # Words that say nothing about *which* reels are wanted. Every saved item is
