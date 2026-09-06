@@ -10,6 +10,163 @@ broke or were missing, discovered after the fact.
 
 ---
 
+## The condenser "emptied real content" — it was running out of tokens to think
+
+**Symptom:** `transcript_summary` and `frame_analysis_summary` coming back
+empty for reels whose raw text was full of substance. Measured across dozens
+of runs at temperature 0.0 on `openai/gpt-oss-20b`: a 713-character chicken
+recipe emptied 9 times in 10, a 2304-character RAG walkthrough 8 in 10, a
+710-character Hindi transcript 4 in 10. Invisible in use — the reel is still
+marked `done`, and the content is simply never searchable again.
+
+**What it looked like, for three sessions:** a model making a bad judgement
+about what was worth keeping. That reading survived because it was
+self-consistent: the condenser really is asked to return nothing for a
+transcript that carries nothing, so an empty reply looked like an answer it
+had chosen.
+
+**Actual cause:** `gpt-oss-20b` is a reasoning model. It spends completion
+tokens thinking before it writes, and on these inputs the thinking consumed
+the whole budget:
+
+```
+finish_reason:     length
+reasoning_tokens:  2046
+completion_tokens: 2048     <- the entire budget, nothing left to answer with
+content:           ''
+```
+
+`_ChatAdapter._complete` did `response.choices[0].message.content or ""` and
+returned that `""`. A truncated non-answer and a deliberate empty answer are
+byte-identical at that line, and only `finish_reason` tells them apart.
+
+Everything that had made the bug incoherent follows from this: longer
+transcripts failed more often (more to reason about), the rate "varied at
+temperature 0.0" (reasoning length drifts, and the limit is a cliff), a retry
+never helped (same input, same overflow — a retry at temp 0.0 is not an
+independent sample, and rescued 0 of the 3 cases it fired on), and a second
+provider looked fine (it does not burn a reasoning budget the same way).
+
+**Fix:** two parts, both in `adapters/llm.py`.
+
+- `reasoning_effort="low"` on the condense call. Compressing text that is
+  already known to be worth compressing is mechanical, and the deliberation
+  was the whole problem: the same answer takes 101 reasoning tokens instead
+  of 2046, and 240 completion tokens instead of 3135. A provider that does
+  not know the parameter has the call retried without it, so this stays a
+  wire-format detail rather than a per-provider code path.
+- `TruncatedResponse` raised rather than `""` returned when a reply is cut
+  off before producing any content. This applies to every adapter sharing
+  `_complete`, not just the condenser — the same silent failure in
+  `ChatSummarizer` would have looked like a slightly worse answer and would
+  never have been filed.
+
+**What the fix undid.** The judgement reading had produced real work, all of
+it now removed: a verbatim copy of the emptied recipe pasted into the prompt
+as a counter-example (~1200 characters, on a call made twice per reel), an
+"always condense, never reply empty" instruction written to take the decision
+away from the model, and a retry loop. A/B'd after the real fix, the plain
+prompt and the "always condense" prompt score identically — recipe 5/5, Hindi
+3/3, hook emptied 3/3 — so the model has its judgement back and makes it
+well. The counter-example had also caused its own regression: taught to look
+harder for something worth keeping, the model went from correctly emptying a
+content-free hook 10/10 to 0/5.
+
+**Damage repaired:** four summaries across three reels had been destroyed in
+the live vault. `scripts/recondense_media.py` rebuilt them from the stored
+`_raw` columns — which is exactly why both halves are stored — with no video
+re-downloaded, and re-embedded each one.
+
+**Regression tests:** `tests/test_truncated_response.py` pins the
+distinction with a stub client returning both shapes, so a truncated reply
+raises while a deliberate empty reply is still respected; it also pins that
+the condense call asks for shallow reasoning, and that a provider rejecting
+that parameter still works. `tests/test_condenser_prompt.py` keeps the
+measured transcripts and the live measurement behind
+`RUN_LIVE_MODEL_TESTS=1`.
+
+**The same bug, found once more by looking for it.** Since nothing guaranteed
+the condenser was the only adapter affected, all six sharing `_complete` were
+measured against real vault data. Five were fine. `ChatItemExtractor` was
+not: on the vault's media-rich reels it spent all 2046 available reasoning
+tokens and returned nothing, at 6 reels and again at 9.
+
+That one failed in the *answer* path rather than the storage path, which
+makes it worse to detect. `_parse_items` turns an empty reply into `[]`, so a
+"compile everything that..." question came back with no items and read as a
+genuine "nothing found". Fixed the same way, `reasoning_effort="low"`: the
+same 9 reels then use 737 reasoning tokens and return 14 items.
+
+Deliberately not applied to the summarizer or comparer beside it. On the
+identical input they used 916 and 665 reasoning tokens and answered fully —
+enumerating every item across many sources is combinatorially harder than
+ranking them, so it is the task shape, not the prompt size, that runs the
+budget out. Lowering reasoning on a synthesis task that works is how a cost
+saving turns into a worse answer. `tests/test_truncated_response.py` pins
+both the fix and that deliberate omission.
+
+**The lesson:** an empty response is not an answer until `finish_reason` has
+been checked. Every measurement in the rate table above was real; the
+conclusion drawn from all of them was not.
+
+---
+
+## oEmbed failed on every save, and following the redirect would have crashed it
+
+**Symptom:** `oEmbed fetch failed for <url>` in the log for every single
+save, with the caption arriving from the `yt-dlp` fallback each time. Nothing
+visibly broke — a caption still came back — so this had been happening
+silently for as long as the endpoint had been redirecting.
+
+**Cause:** `OEmbedCaptionFetcher.fetch()` called `httpx.get()` without
+`follow_redirects=True`. httpx does not follow redirects by default, and
+`raise_for_status()` treats an unfollowed 3xx as an error, so a 301 landed
+straight in the `except httpx.HTTPError` arm. Instagram had started
+answering `api.instagram.com/oembed` with a 301 to the trailing-slash form.
+Every call failed on the redirect without ever reaching the endpoint.
+
+**What following it actually revealed — the reason this is two fixes, not
+one.** Measured live on 2026-08-31 across three URL shapes:
+
+```
+follow_redirects=False -> 301
+follow_redirects=True  -> 301 -> 302 -> 200, content-type text/html, 619KB
+                          <title>Instagram</title>   (the login wall)
+```
+
+The endpoint no longer returns JSON to anyone. `api.instagram.com/oembed` is
+the legacy unauthenticated endpoint Meta retired in favour of
+`graph.facebook.com/<version>/instagram_oembed`, which needs an app token
+this project does not have. So `follow_redirects=True` on its own does not
+make oEmbed work — it turns a caught `HTTPStatusError` into an **uncaught**
+`json.JSONDecodeError` from `response.json()`. Nothing upstream catches it:
+`Vault.save_reel()` calls `self._caption_fetcher.fetch(url)` bare, so the
+exception would have propagated out and killed the save outright. The "fix"
+alone would have converted a silent, working fallback into a hard failure on
+every share.
+
+**Fix:** both halves. `follow_redirects=True`, so the call reaches the
+endpoint it was aimed at; and `response.json()` wrapped so a non-JSON body
+(or a JSON payload that isn't an object) is logged and returns `None`, the
+same as any other miss, letting the scraper fallback run. The endpoint is
+kept rather than deleted: it costs one request, and it starts working again
+the day a Facebook app token is configured.
+
+**Regression tests:** `tests/test_caption_fetchers.py`. Its transport replays
+the live chain — 301 to the trailing-slash path, then the HTML login wall —
+through a real `httpx.Client`, so httpx itself decides what following a
+redirect means and what `raise_for_status` does with one it did not follow.
+The tests assert behaviour rather than the call's signature: that the request
+which finally lands is for the redirected path (this fails if the flag is
+removed — checked by reverting it), that an HTML body is a miss rather than
+an exception, and that a real oEmbed payload is still parsed.
+
+**Practical consequence:** captions come from `yt-dlp` in every case today.
+That was already true; it is now true on purpose and visible in the log
+rather than hidden behind a per-save error.
+
+---
+
 ## The summarizer sometimes credited a caption with answering a question it never addressed
 
 **Symptom:** `"how do I grow my personal brand"` against a single matched

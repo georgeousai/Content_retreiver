@@ -20,7 +20,7 @@ from reel_vault.models import SavedReel
 # A keyword hit is strong evidence but not proof: the vault filed this reel
 # under a name the query used. Scaling coverage by this keeps a full-coverage
 # keyword match (0.8) below a near-perfect semantic match while leaving a
-# half-coverage one (0.4) above the default 0.35 threshold.
+# half-coverage one (0.4) above the default 0.30 threshold.
 KEYWORD_WEIGHT = 0.8
 
 # Words that say nothing about *which* reels are wanted. Every saved item is
@@ -56,8 +56,11 @@ def embedding_text(
     tags: list[str],
     collection: str,
     subcollection: str | None,
+    transcript_summary: str = "",
+    frame_analysis_summary: str = "",
 ) -> str:
-    """The text a reel is embedded as — its curated metadata, then its caption.
+    """The text a reel is embedded as — its caption, what its video turned out
+    to say and show, and the curated metadata it was filed under.
 
     Caption alone is too thin a signal to retrieve on. A reel filed under
     "Product Management > Interviews", tagged "case prep", scored 0.330
@@ -67,9 +70,74 @@ def embedding_text(
     Personal Growth > Journey and would otherwise be findable by neither
     word), so it is embedded alongside the caption rather than left to one
     side.
+
+    The media summaries join the same text rather than getting an arm of
+    their own. They are free prose like the caption, best matched by meaning,
+    and folding them in is what finally makes a comment-bait reel — "comment
+    HABITS for my list", nearly half the live vault — findable by what the
+    creator actually said out loud. Only the condensed halves belong here:
+    embedding a full transcript would swamp the caption and the shelf it sits
+    on, and the raw text is kept for regenerating a summary, not for search.
+
+    **The order is load-bearing, because the embedder truncates silently.**
+    `all-MiniLM-L6-v2` takes 256 word-pieces and sentence-transformers drops
+    the rest without a warning. Across the live vault 7 of 33 reels overflow
+    that, so whatever sits last in this string is what stops being searchable
+    — and with the metadata leading, that was the media summaries, on 2 of
+    the 3 overflowing reels that had them. The one thing the media pipeline
+    exists to make findable was the first thing thrown away.
+
+    So the caption and the media summaries lead, and the curated metadata
+    trails. Not because the metadata matters less, but because it is the part
+    that can afford to be cut: the collection, sub-collection and tags are
+    matched word-for-word by the keyword arm on their own untruncated text
+    (`metadata_text`), and a collection asked for by name is looked up
+    directly without any embedding at all. Losing them here costs a reel one
+    of three retrieval paths. What a reel said and showed has only this one.
     """
-    parts = (collection, subcollection or "", " ".join(tags), caption)
+    parts = (
+        caption,
+        transcript_summary,
+        frame_analysis_summary,
+        collection,
+        subcollection or "",
+        " ".join(tags),
+    )
     return " | ".join(part.strip() for part in parts if part.strip())
+
+
+def embedding_text_for(
+    reel: SavedReel,
+    collection: str | None = None,
+    subcollection: str | None = None,
+) -> str:
+    """What an already-saved reel should be embedded as, optionally as if it
+    sat on a different shelf.
+
+    The one place a stored reel is turned into embedding text. Everything
+    except the shelf comes from the reel, so a move cannot quietly drop the
+    transcript it had already earned -- which is exactly what re-deriving the
+    text from the caption alone would do.
+
+    It exists as a function rather than a method on `Vault` because the
+    repair scripts need it too, and the three of them spelling
+    `embedding_text`'s arguments out for themselves is how a new embedded
+    field ends up reaching live reels and not backfilled ones.
+
+    Passing `collection` also decides `subcollection`: a move sets both, and
+    a sub-collection belongs to the shelf it was named under, so carrying the
+    old one across would file the reel under a pairing that never existed.
+    """
+    if collection is None:
+        collection, subcollection = reel.collection, reel.subcollection
+    return embedding_text(
+        reel.caption,
+        reel.tags,
+        collection,
+        subcollection,
+        reel.transcript_summary,
+        reel.frame_analysis_summary,
+    )
 
 
 def metadata_text(

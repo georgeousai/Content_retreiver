@@ -1,4 +1,4 @@
-"""Unit tests for the Groq adapters' reply parsing.
+"""Unit tests for the chat adapters' reply parsing.
 
 No network: these exercise the pure parsing functions. They exist because an
 unparsed reply is never an error the user sees — it is silently the wrong
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from reel_vault.adapters.groq_llm import (
+from reel_vault.adapters.llm import (
     _format_source,
     _parse_assignment,
     _parse_classification,

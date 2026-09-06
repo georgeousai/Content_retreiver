@@ -13,6 +13,14 @@ from reel_vault.models import ExtractedPost
 
 logger = logging.getLogger(__name__)
 
+# The legacy, unauthenticated oEmbed endpoint. Measured live on 2026-08-31 it
+# no longer serves JSON to anyone: it 301s to a trailing-slash form, then 302s,
+# and answers 200 with Instagram's HTML login wall. Meta retired it in favour
+# of `graph.facebook.com/<version>/instagram_oembed`, which needs an app token
+# this project does not have. It is left in place — correctly handled rather
+# than silently erroring — because it costs one request and would start
+# working again the day a token is configured; in the meantime every caption
+# in practice comes from the yt-dlp fallback below.
 OEMBED_URL = "https://api.instagram.com/oembed"
 
 
@@ -32,14 +40,43 @@ class OEmbedCaptionFetcher:
     def fetch(self, url: str) -> ExtractedPost | None:
         try:
             response = httpx.get(
-                OEMBED_URL, params={"url": url}, timeout=self._timeout
+                OEMBED_URL,
+                params={"url": url},
+                timeout=self._timeout,
+                # Instagram answers this endpoint with a 301 to a trailing-slash
+                # form (and a 302 after that). httpx does not follow redirects
+                # unless told to, and `raise_for_status` treats an unfollowed 3xx
+                # as an error, so without this every oEmbed call failed on the
+                # redirect and never reached the endpoint it was aimed at.
+                follow_redirects=True,
             )
             response.raise_for_status()
         except httpx.HTTPError as exc:
             logger.info("oEmbed fetch failed for %s: %s", url, exc)
             return None
 
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError:
+            # A 200 carrying HTML is what this endpoint answers today (see
+            # OEMBED_URL above), so it has to read as "oEmbed has nothing for
+            # us" — the same as any other failure — and let the scraper
+            # fallback run. Letting a JSONDecodeError out of here instead
+            # would abort the whole save: nothing upstream catches it.
+            logger.info(
+                "oEmbed returned a non-JSON body for %s (content-type %s)",
+                url,
+                response.headers.get("content-type"),
+            )
+            return None
+
+        if not isinstance(data, dict):
+            # Valid JSON that is not an object — an error array, a bare
+            # string. `.get` would raise on it, which lands in the same place
+            # a JSONDecodeError would: out of the fetcher and into the save.
+            logger.info("oEmbed returned an unexpected payload for %s", url)
+            return None
+
         caption = data.get("title")
         if not isinstance(caption, str) or not _usable(caption):
             return None

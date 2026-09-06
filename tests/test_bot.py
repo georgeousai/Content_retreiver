@@ -1,6 +1,6 @@
 """Smoke tests for the Telegram-adapter layer: it should correctly delegate
 to `Vault.save_reel`/`Vault.ask` and relay results as replies. No real
-Telegram, Instagram, Groq, or Postgres calls are made."""
+Telegram, Instagram, model-provider, or Postgres calls are made."""
 
 from __future__ import annotations
 
@@ -592,3 +592,158 @@ async def test_undo_on_a_reel_that_was_never_moved_says_so(bot: ReelVaultBot) ->
     await bot._on_callback(update, MagicMock())
 
     assert "nothing to undo" in query.answer.await_args.args[0].lower()
+
+
+async def test_a_ranked_reply_prints_the_measure_it_ranked_by(
+    bot: ReelVaultBot,
+) -> None:
+    """The bot never asks which reading of "best" was meant, so showing the
+    one it chose is the only way the user can tell it got it wrong."""
+    bot._vault = make_vault(
+        captions={"https://instagram.com/reel/B1": "bicep curl form tips"},
+    )
+    assert isinstance(bot._vault.save_reel("https://instagram.com/reel/B1"), Saved)
+
+    message = _make_message("best bicep exercise")
+    await bot._on_message(_make_update(message), MagicMock())
+
+    all_replies = "\n".join(call.args[0] for call in message.reply_text.await_args_list)
+    assert "Ranked by:" in all_replies
+    assert "instagram.com/p/B1" in all_replies  # and the reel behind the verdict
+
+
+async def test_a_compiled_reply_is_a_list_not_a_paragraph(bot: ReelVaultBot) -> None:
+    bot._vault = make_vault(
+        captions={
+            "https://instagram.com/reel/Q1": "interview question: tell me about yourself",
+            "https://instagram.com/reel/Q2": "interview question: why this company",
+        },
+    )
+    for url in ("https://instagram.com/reel/Q1", "https://instagram.com/reel/Q2"):
+        assert isinstance(bot._vault.save_reel(url), Saved)
+
+    message = _make_message("compile the interview questions")
+    await bot._on_message(_make_update(message), MagicMock())
+
+    all_replies = "\n".join(call.args[0] for call in message.reply_text.await_args_list)
+    assert "• interview question: tell me about yourself" in all_replies
+    assert "• interview question: why this company" in all_replies
+
+
+async def test_matching_reels_that_list_nothing_is_not_reported_as_no_match(
+    bot: ReelVaultBot,
+) -> None:
+    """"Nothing matches" would send the user hunting for saves that are
+    sitting right there — the reels matched, they just had no items in them."""
+    bot._vault = make_vault(captions={"https://instagram.com/reel/E1": "ai agents"})
+    assert isinstance(bot._vault.save_reel("https://instagram.com/reel/E1"), Saved)
+    bot._vault._item_extractor = MagicMock(extract_items=MagicMock(return_value=[]))
+
+    message = _make_message("compile the ai tools")
+    await bot._on_message(_make_update(message), MagicMock())
+
+    reply = message.reply_text.await_args.args[0]
+    assert reply != "Nothing in the vault matches that."
+    assert "none of them" in reply.lower()
+
+
+async def test_a_stale_file_id_costs_one_card_not_the_rest_of_the_answer(
+    bot: ReelVaultBot,
+) -> None:
+    """The confirmation path guarded `reply_photo` and the query path did
+    not. One file_id Telegram no longer honours therefore raised out of the
+    middle of the card loop: the user lost every remaining reel and the
+    answer they were the evidence for, over a picture."""
+    bot._vault = make_vault(
+        captions={
+            "https://instagram.com/reel/A1": "ai agents explained",
+            "https://instagram.com/reel/A2": "ai agents in production",
+        },
+    )
+    _save_with_picture(bot._vault, "https://instagram.com/reel/A1", "", "dead-file-id")
+    _save_with_picture(bot._vault, "https://instagram.com/reel/A2", "", "file-2")
+
+    message = _make_message("show me my ai agents reels")
+
+    def photo(*args, **kwargs):
+        if kwargs["photo"] == "dead-file-id":
+            raise TelegramError("wrong file identifier")
+        return _photo_reply(kwargs["photo"])
+
+    message.reply_photo.side_effect = photo
+    await bot._on_message(_make_update(message), MagicMock())
+
+    # The good card still went as a picture...
+    photos = {
+        call.kwargs["photo"] for call in message.reply_photo.await_args_list
+    }
+    assert photos == {"dead-file-id", "file-2"}
+    # ...and the dead one fell back to text rather than taking the reply down.
+    text_replies = [
+        call.args[0] for call in message.reply_text.await_args_list if call.args
+    ]
+    assert any("instagram.com/p/A1" in reply for reply in text_replies)
+
+
+async def test_the_collection_question_mints_the_picture_before_the_pause(
+    bot: ReelVaultBot,
+) -> None:
+    """The extracted thumbnail URL is signed and expires, and a save paused
+    on a collection choice sits in front of the user for as long as they take
+    to answer. Minting the durable reference when the question is asked —
+    rather than carrying the raw URL across that pause — is what keeps an
+    overnight answer from finishing with a link that has already gone. It
+    also shows the reel at the moment the user is asked where to file it.
+    """
+    url = "https://instagram.com/reel/PIC"
+    bot._vault = make_vault(
+        captions={
+            url: ExtractedPost(
+                caption="5yrs ago this wasn't a thing",
+                thumbnail_url="https://cdn/expiring.jpg",
+            )
+        },
+        assignments={
+            "5yrs ago this wasn't a thing": CollectionAssignment(
+                collection=UNCATEGORIZED
+            )
+        },
+    )
+
+    asking = _make_message(url, chat_id=7)
+    asking.reply_photo.return_value = _photo_reply("tg-file-id")
+    await bot._on_message(_make_update(asking, chat_id=7), chat_id_ignored := MagicMock())
+
+    # The question itself was the upload.
+    assert asking.reply_photo.await_args.kwargs["photo"] == "https://cdn/expiring.jpg"
+    assert bot._pending_collection_choice[7].thumbnail_ref == "tg-file-id"
+
+    answering = _make_message("Old Trends", chat_id=7)
+    await bot._on_message(_make_update(answering, chat_id=7), chat_id_ignored)
+
+    saved = bot._vault._store.find_by_url("https://instagram.com/p/PIC")
+    assert saved is not None
+    assert saved.collection == "Old Trends"
+    # Kept from the question, and never re-minted from the expired URL.
+    assert saved.thumbnail_ref == "tg-file-id"
+    assert answering.reply_photo.await_args.kwargs["photo"] == "tg-file-id"
+
+
+async def test_a_collection_question_without_a_picture_is_still_just_asked(
+    bot: ReelVaultBot,
+) -> None:
+    url = "https://instagram.com/reel/NOPIC"
+    bot._vault = make_vault(
+        captions={url: "5yrs ago this wasn't a thing"},
+        assignments={
+            "5yrs ago this wasn't a thing": CollectionAssignment(
+                collection=UNCATEGORIZED
+            )
+        },
+    )
+
+    message = _make_message(url, chat_id=8)
+    await bot._on_message(_make_update(message, chat_id=8), MagicMock())
+
+    message.reply_photo.assert_not_awaited()
+    assert bot._pending_collection_choice[8].thumbnail_ref is None

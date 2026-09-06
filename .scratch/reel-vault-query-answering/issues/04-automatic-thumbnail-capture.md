@@ -16,4 +16,28 @@ This ticket is verifiable at the vault/model level (the reference is captured an
 - [x] The persisted reference is the durable Telegram `file_id`, not the raw expiring Instagram CDN URL.
 - [x] A save that pauses on `NeedsCollectionChoice` carries `thumbnail_ref` through to the `SavedReel` produced by `assign_collection`, with no second thumbnail upload.
 - [x] Thumbnail capture failing (e.g. upload error) does not fail the whole save — the reel still saves with `thumbnail_ref is None`.
+
+## Built differently from the spec: no `ThumbnailStore` port
+
+Every outcome above holds, but the mechanism named here — a `ThumbnailStore`
+port whose adapter uploads the image — was not what shipped, and the ticket
+went on claiming it was. What exists instead: the save confirmation *is* the
+upload. Telegram fetches the expiring Instagram URL server-side to render the
+reply, and the `file_id` it hands back is what gets stored, via
+`Vault.attach_thumbnail`. See commit `ae1bffc`.
+
+The reason it is better: a separate `ThumbnailStore.store()` call has nowhere
+to upload to except the same chat, so it would post the picture twice — once
+to mint the reference and once to show the user — for a reply that already
+had to send it.
+
+The reason the spec's wording still mattered: it also asked
+`NeedsCollectionChoice` to carry a `thumbnail_ref`, and the shipped version
+carried the raw `thumbnail_url` across an unbounded pause instead — a save
+paused overnight minted its "durable" reference from a signed URL that had
+already expired, which is the one failure this whole decision existed to
+prevent. Fixed by minting when the collection question is asked: that message
+is now the upload, exactly as the confirmation is for a reel that needed no
+question. `NeedsCollectionChoice` carries both fields, and the vault prefers
+the ref.
 </content>
