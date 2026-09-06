@@ -28,14 +28,18 @@ class ProcessingStatus(Enum):
     # claims the video was actually read, and from PENDING, which would queue
     # every old reel for download the next time the bot starts.
     SKIPPED = "skipped"
-    # Heard but not looked at: the audio was transcribed and no vision
-    # endpoint was configured, so the frames were never sent anywhere.
-    # Distinct from DONE for the same reason SKIPPED is -- an empty
+    # Heard but not looked at: the audio was transcribed and the frames were
+    # not read -- either never sent anywhere, because no vision endpoint was
+    # configured, or sent and not answered, because the call failed (a rate
+    # limit during a burst of saves is the case that was found). Distinct
+    # from DONE for the same reason SKIPPED is -- an empty
     # `frame_analysis_summary` under DONE is a claim that the frames were
     # read and carried nothing, which is indistinguishable from never having
     # looked. Not PENDING, because these reels are not interrupted work:
     # re-queueing them would re-download every one of them on the next
-    # restart and read their frames with the same absent model.
+    # restart, and for the no-model case read their frames with the same
+    # absent model. A pass with a working vision model is how they get
+    # finished, and this status is what lets such a pass find them.
     FRAMES_UNREAD = "frames_unread"
 
 

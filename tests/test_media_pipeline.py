@@ -165,10 +165,13 @@ class _StubTranscriber:
 
 
 class _StubSampler:
-    def __init__(self, frames: list[bytes] | None = None) -> None:
+    def __init__(self, frames: list[bytes] | None = None, raises: bool = False) -> None:
         self.frames = frames if frames is not None else [b"jpeg"]
+        self.raises = raises
 
     def sample(self, media_path: Path, max_frames: int) -> list[bytes]:
+        if self.raises:
+            raise RuntimeError("decoder died")
         return self.frames
 
 
@@ -270,6 +273,47 @@ def test_an_extractor_with_no_analyzer_says_the_frames_went_unread() -> None:
 
 def test_an_analyzer_that_read_nothing_still_counts_as_having_looked() -> None:
     result = _extractor(frame_analyzer=_StubAnalyzer(text="")).extract(URL)
+
+    assert result is not None
+    assert result.frames_read is True
+
+
+def test_an_analyzer_that_raised_did_not_read_the_frames() -> None:
+    """Found in the live vault: a reel with a full transcript, no frame text,
+    and status DONE. The vision call had failed -- a rate limit, during a
+    burst of saves -- and `frames_read` was True because an analyzer
+    *existed*. "Is one configured" and "did it answer" are different
+    questions, and only the second one says whether the frames were read.
+
+    The distinction is the whole reason `FRAMES_UNREAD` exists: with it a
+    later pass can find this reel and finish it; without it the reel is
+    indistinguishable from one whose video had nothing on screen.
+    """
+    result = _extractor(frame_analyzer=_StubAnalyzer(raises=True)).extract(URL)
+
+    assert result is not None
+    assert result.transcript == "spoken words"
+    assert result.frame_analysis == ""
+    assert result.frames_read is False
+
+
+def test_a_sampler_that_raised_did_not_read_the_frames_either() -> None:
+    """Same principle one step earlier. A video whose frames could not be
+    decoded has not had them read; that is not knowledge that there was
+    nothing on them."""
+    result = _extractor(frame_sampler=_StubSampler(raises=True)).extract(URL)
+
+    assert result is not None
+    assert result.transcript == "spoken words"
+    assert result.frames_read is False
+
+
+def test_a_sampler_that_found_no_frames_still_counts_as_having_looked() -> None:
+    """The line between unread and empty. No frames came back, so there is
+    nothing the analyzer could have read -- that is knowing the answer, not
+    failing to get one, and it must not be filed for a retry that would find
+    the same nothing."""
+    result = _extractor(frame_sampler=_StubSampler(frames=[])).extract(URL)
 
     assert result is not None
     assert result.frames_read is True

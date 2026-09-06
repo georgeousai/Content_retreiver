@@ -61,13 +61,18 @@ starting another status file. Check items off (or move them to
   have background music, not silence. Caveat: threshold calibrated on 4
   reels; check it against a few more narrated ones before shipping. Contained
   to `adapters/transcribe.py`.
-- [ ] **A frame-analysis failure is marked `done` and never retried.** Real
-  example: `DJWt0lGyRGJ` has a full transcript and *zero* frame data. In
-  `media.py`, a vision error (a Gemini rate limit, most likely) is caught,
-  logged at INFO only, and returns "" — then the reel is marked `done` because
-  the transcript half succeeded. In the DB that's indistinguishable from "the
-  video had nothing on screen," and nothing ever comes back for it. Worth
-  either a `partial` status or logging at WARNING so it's visible.
+- [x] **DONE 2026-09-06 — A frame-analysis failure is marked `done` and
+  never retried.** Root cause: `frames_read` was derived from "is an
+  analyzer configured", not "did it answer", so a raised vision call (a rate
+  limit, during a burst of saves) looked identical to a video with nothing
+  on screen. `_read_frames` now reports whether it actually read; a raised
+  sampler or analyzer yields `frames_read=False` and the reel lands in
+  `FRAMES_UNREAD` (widened to cover this cause), findable for a later pass.
+  Failures log at WARNING. Not retried automatically on restart — that
+  re-downloads the video and, under a persistent rate limit, burns quota to
+  fail again. Three tests in `test_media_pipeline.py` pin unread-vs-empty.
+  **Not done:** `DJWt0lGyRGJ` itself was written before this and still sits
+  as `done`; only a re-read pass fixes existing rows.
 - [ ] **The classifier only ever sees the caption** — the transcript and
   frame summaries arrive later, in the background, after the collection is
   already assigned. Real cost, 2026-09-06: a Bengaluru restaurant-visit reel

@@ -455,12 +455,14 @@ class Vault:
         Retrying forever on a video that has expired would re-download it on
         every restart for as long as the reel exists.
 
-        An extraction whose frames were never looked at — no vision endpoint
-        configured — is recorded as `FRAMES_UNREAD`, not DONE. It is a real
-        read of the audio and should not be retried on every restart, but it
-        is not the finished job DONE claims, and the difference is invisible
-        in the columns themselves: a reel nobody looked at and a reel with
-        nothing on screen both hold an empty `frame_analysis_summary`.
+        An extraction whose frames were not read — no vision endpoint
+        configured, or the vision call failed — is recorded as
+        `FRAMES_UNREAD`, not DONE. It is a real read of the audio and should
+        not be retried on every restart, but it is not the finished job DONE
+        claims, and the difference is invisible in the columns themselves: a
+        reel nobody looked at and a reel with nothing on screen both hold an
+        empty `frame_analysis_summary`. The extractor decides which it was;
+        this only records the answer.
         """
         normalized = normalize_reel_url(url)
         existing = self._store.find_by_url(normalized)
@@ -498,10 +500,10 @@ class Vault:
             transcript_summary=transcript_summary,
             frame_analysis_raw=extraction.frame_analysis,
             frame_analysis_summary=frame_summary,
-            # DONE claims the video was read. It was only half read when no
-            # vision model was configured to look at the frames, and an
-            # empty `frame_analysis_summary` cannot say which of those
-            # happened on its own.
+            # DONE claims the video was read. It was only half read when the
+            # frames went unread -- no vision model configured, or the call
+            # to one failed -- and an empty `frame_analysis_summary` cannot
+            # say which of those happened on its own.
             processing_status=(
                 ProcessingStatus.DONE
                 if extraction.frames_read

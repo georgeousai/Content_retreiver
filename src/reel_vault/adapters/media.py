@@ -79,9 +79,18 @@ class VideoMediaExtractor:
         other's work.
 
         `frames_read` on the result separates a third case from those two:
-        the frames were never sent anywhere, because no vision model is
-        configured. That is not a failure to retry and not a finished read,
-        and the caller needs to be able to tell.
+        the frames were not read -- either never sent anywhere, because no
+        vision model is configured, or sent and not answered, because the
+        call failed. Neither is a finished read, and an empty
+        `frame_analysis` cannot say which of the three happened on its own.
+
+        The second cause was found the hard way: a reel with a full
+        transcript and no frame text at all, marked DONE. The vision call had
+        failed (a rate limit, most likely -- it was one of a burst of saves),
+        `_read_frames` returned "" as it does for a video with nothing on
+        screen, and `frames_read` was True because an analyzer *existed*. In
+        the database that was indistinguishable from "we looked, there was
+        nothing there", and nothing ever came back for it.
         """
         # TemporaryDirectory removes the tree on the way out of the block —
         # on success, on failure, and on an exception thrown through it. That
@@ -92,10 +101,11 @@ class VideoMediaExtractor:
             if video is None:
                 return None
 
+            frame_analysis, frames_read = self._read_frames(video)
             extraction = MediaExtraction(
                 transcript=self._transcribe(video),
-                frame_analysis=self._read_frames(video),
-                frames_read=self._frame_analyzer is not None,
+                frame_analysis=frame_analysis,
+                frames_read=frames_read,
             )
 
         if extraction.is_empty():
@@ -117,24 +127,49 @@ class VideoMediaExtractor:
             logger.info("Transcription failed for %s: %s", video.name, exc)
             return ""
 
-    def _read_frames(self, video: Path) -> str:
+    def _read_frames(self, video: Path) -> tuple[str, bool]:
+        """What the frames showed, and whether anyone actually looked.
+
+        The second value is the one that used to be derived from "is an
+        analyzer configured", which is a different question. An analyzer
+        that exists and raises has not read anything, and saying it has is
+        how a rate-limited reel ended up filed as finished.
+
+        Reads as False whenever this does not know what is on the frames:
+        no analyzer, sampling raised, analysis raised. Reads as True when it
+        does know -- including knowing there was nothing, which is what a
+        sampler returning no frames or an analyzer returning "" both mean.
+        Uncertainty and emptiness are the two things the old code conflated.
+
+        The failures log at WARNING, not INFO. A rate limit during a burst
+        of saves is exactly the kind of thing that scrolls past unnoticed,
+        and the person watching the terminal for it was told nothing.
+        """
         if self._frame_analyzer is None:
-            return ""
+            return "", False
 
         try:
             frames = self._frame_sampler.sample(video, self._max_frames)
         except Exception as exc:
-            logger.info("Frame sampling failed for %s: %s", video.name, exc)
-            return ""
+            logger.warning(
+                "Frame sampling failed for %s; frames left unread: %s",
+                video.name,
+                exc,
+            )
+            return "", False
 
         if not frames:
-            return ""
+            return "", True
 
         try:
-            return self._frame_analyzer.analyze(frames)
+            return self._frame_analyzer.analyze(frames), True
         except Exception as exc:
-            logger.info("Frame analysis failed for %s: %s", video.name, exc)
-            return ""
+            logger.warning(
+                "Frame analysis failed for %s; frames left unread: %s",
+                video.name,
+                exc,
+            )
+            return "", False
 
 
 class YtDlpVideoDownloader:
