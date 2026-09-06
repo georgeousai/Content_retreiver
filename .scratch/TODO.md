@@ -27,17 +27,17 @@ starting another status file. Check items off (or move them to
   presence of real numbers heavily enough on *short* inputs specifically —
   different shape of failure than the messy-long-transcript under-keeping
   case below. Only one confirmed example so far.
-- [ ] **`has_substance` doesn't catch Whisper hallucinations that happen to
-  look like real language.** Two real examples: "... ... Sous-titrage
-  Société Radio-Canada" and "I'm going to go to the next video." — both are
-  well-documented Whisper hallucination patterns on silent/non-speech audio
-  (this project already logged shorter versions: "." and "Thank you.").
-  Both wrongly passed `has_substance` (capitalized words / real word count
-  look legitimate), and both were only correctly emptied because the
-  condenser's own separate judgment caught them downstream. No visible harm
-  yet — but it's working by having two layers, not because either layer
-  alone is right about this text. Likely to recur specifically in
-  cooking/fitness niches, which often have silent demo footage.
+- [x] **DONE 2026-09-06 — `has_substance` doesn't catch Whisper
+  hallucinations that happen to look like real language.** Fixed upstream of
+  `has_substance` instead: `adapters/transcribe.py` now asks for
+  `verbose_json` and discards a transcript only when the model was *both*
+  unsure and said almost nothing for the length of the audio. Calibrated on
+  six real reels; density turned out to be the stronger signal (1.14 vs
+  11.90 chars/sec between the worst hallucination and the worst real
+  transcript, against 0.41 on confidence), and confidence alone proved
+  unstable — the same reel scored -0.509 and -0.677 on two runs of identical
+  audio. Verified live: 6/6 correct, both hallucinations emptied, all four
+  real transcripts kept. `tests/test_transcription_gate.py`.
 - [ ] **Whisper's Hindi transcription accuracy is genuinely poor on fast/
   colloquial Hinglish, and the full `whisper-large-v3` does not fix it.**
   Measured on the strength-training reel: turbo produced 385 chars of
