@@ -302,3 +302,51 @@ def test_an_empty_reply_from_the_condenser_is_taken_at_its_word(
     assert saved.transcript_summary == ""
     # The words are kept regardless, so a summary given up on is recoverable.
     assert saved.transcript_raw == TRANSCRIPT
+
+
+def test_frames_nobody_looked_at_are_not_recorded_as_a_finished_read(
+    store: InMemoryReelStore,
+) -> None:
+    """No vision endpoint configured means the frames were never sent
+    anywhere. Filed as DONE that is a claim the video was read, and an empty
+    `frame_analysis_summary` is then indistinguishable from a video with
+    nothing on screen — so adding a vision key later would never have found
+    one of these reels again."""
+    vault = _saved_vault(store)
+
+    vault.attach_media(URL, MediaExtraction(transcript=TRANSCRIPT, frames_read=False))
+
+    saved = store.find_by_url(SAVED_URL)
+    assert saved is not None
+    assert saved.processing_status is ProcessingStatus.FRAMES_UNREAD
+    # The half that was read is still read, and still reaches retrieval.
+    assert saved.transcript_summary == TRANSCRIPT
+
+
+def test_a_video_whose_frames_carried_nothing_is_a_finished_read(
+    store: InMemoryReelStore,
+) -> None:
+    """The other side of that distinction: the frames were looked at and had
+    nothing on them, which is a complete answer, not a gap."""
+    vault = _saved_vault(store)
+
+    vault.attach_media(
+        URL, MediaExtraction(transcript=TRANSCRIPT, frame_analysis="", frames_read=True)
+    )
+
+    saved = store.find_by_url(SAVED_URL)
+    assert saved is not None
+    assert saved.processing_status is ProcessingStatus.DONE
+
+
+def test_a_reel_whose_frames_went_unread_is_not_queued_again(
+    store: InMemoryReelStore,
+) -> None:
+    """Not PENDING: these reels are not interrupted work. Re-queueing them
+    would re-download every one on the next restart and read their frames
+    with the same absent model."""
+    vault = _saved_vault(store)
+
+    vault.attach_media(URL, MediaExtraction(transcript=TRANSCRIPT, frames_read=False))
+
+    assert vault.resume_pending_media() == []

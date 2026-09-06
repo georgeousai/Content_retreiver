@@ -4,9 +4,11 @@ from reel_vault.models import (
     AggregateAnswer,
     ListAnswer,
     NoMatch,
+    QueryKind,
     Saved,
     SingleItemAnswer,
 )
+from reel_vault.vault import RetrievalSettings
 from tests.conftest import make_vault
 from tests.fakes import FakeSummarizer, InMemoryReelStore
 
@@ -122,3 +124,12 @@ def test_per_intent_caps_are_tunable() -> None:
 
     assert isinstance(answer, ListAnswer)
     assert len(answer.reels) == 8
+
+
+def test_every_query_kind_has_a_retrieval_cap_decided_for_it() -> None:
+    """The caps and the answer-writers are both keyed on `QueryKind`, and a
+    kind added to one and forgotten in the other is the drift that keeping
+    them in separate cascades invites. This is the guard that makes the
+    omission loud at construction rather than a KeyError on whichever query
+    happens to be classified as the new kind first."""
+    assert set(RetrievalSettings().caps()) == set(QueryKind)

@@ -9,7 +9,7 @@ Telegram, any model provider, Postgres, or any other concrete integration.
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from reel_vault.models import (
     UNCATEGORIZED,
@@ -47,7 +47,7 @@ from reel_vault.ports import (
     Summarizer,
     Tagger,
 )
-from reel_vault.search import embedding_text, search_terms
+from reel_vault.search import embedding_text, embedding_text_for, search_terms
 from reel_vault.substance import has_substance
 from reel_vault.urls import normalize_reel_url
 
@@ -87,6 +87,60 @@ DEFAULT_NEIGHBOUR_COUNT = 5
 DEFAULT_NEIGHBOUR_FLOOR = 0.25
 
 
+@dataclass(frozen=True)
+class RetrievalSettings:
+    """Every knob that decides what a question retrieves, as one value.
+
+    A type rather than six parameters because they never travel apart: they
+    are set together at construction, read together on every `ask`, and each
+    is a bare number whose meaning lives entirely in the name it was passed
+    under — the shape in which a caller hands `0.25` to `match_threshold`
+    meaning to hand it to `neighbour_floor`, and nothing anywhere objects.
+
+    Kept out of `Config` on purpose: these are properties of how the vault
+    retrieves, not of which provider it is pointed at, and user story 12 of
+    the query-answering spec asks for them to be tunable per user later
+    without a redesign. One value to thread is what makes that a change of
+    argument rather than a change of signature.
+    """
+
+    match_threshold: float = DEFAULT_MATCH_THRESHOLD
+    top_k_single: int = DEFAULT_TOP_K_SINGLE
+    top_k_list: int = DEFAULT_TOP_K_LIST
+    top_k_aggregate: int = DEFAULT_TOP_K_AGGREGATE
+    neighbour_count: int = DEFAULT_NEIGHBOUR_COUNT
+    neighbour_floor: float = DEFAULT_NEIGHBOUR_FLOOR
+
+    def caps(self) -> dict[QueryKind, int]:
+        """One cap per intent, not one shared cap: a list costs only a
+        database read, so it can be generous, while every reel in an
+        aggregate becomes part of a single LLM prompt — the free-tier
+        budget, not relevance, is what bounds it.
+
+        Exhaustive over `QueryKind` by construction, so a kind added later
+        cannot reach `ask` without a cap decided for it.
+        """
+        caps = {
+            QueryKind.SINGLE: self.top_k_single,
+            QueryKind.LIST: self.top_k_list,
+            QueryKind.AGGREGATE: self.top_k_aggregate,
+            # Author queries are a plain filter, not a similarity search, so
+            # this bounds the rows handed back rather than the search itself.
+            QueryKind.AUTHOR_FILTER: self.top_k_list,
+            # Both read every match into one prompt, like AGGREGATE, so the
+            # free-tier budget bounds them the same way.
+            QueryKind.COMPARE_RANK: self.top_k_aggregate,
+            QueryKind.EXTRACT_COMPILE: self.top_k_aggregate,
+        }
+        missing = set(QueryKind) - set(caps)
+        if missing:
+            raise ValueError(
+                f"No retrieval cap decided for: "
+                f"{', '.join(sorted(kind.name for kind in missing))}"
+            )
+        return caps
+
+
 class Vault:
     def __init__(
         self,
@@ -106,12 +160,7 @@ class Vault:
         # pipeline existed, and every test that is not about media should not
         # have to supply one.
         media_extractor: MediaExtractor | None = None,
-        match_threshold: float = DEFAULT_MATCH_THRESHOLD,
-        top_k_single: int = DEFAULT_TOP_K_SINGLE,
-        top_k_list: int = DEFAULT_TOP_K_LIST,
-        top_k_aggregate: int = DEFAULT_TOP_K_AGGREGATE,
-        neighbour_count: int = DEFAULT_NEIGHBOUR_COUNT,
-        neighbour_floor: float = DEFAULT_NEIGHBOUR_FLOOR,
+        retrieval: RetrievalSettings | None = None,
     ) -> None:
         self._caption_fetcher = caption_fetcher
         self._tagger = tagger
@@ -124,20 +173,17 @@ class Vault:
         self._item_extractor = item_extractor
         self._media_extractor = media_extractor
         self._condenser = condenser
-        self._match_threshold = match_threshold
-        self._neighbour_count = neighbour_count
-        self._neighbour_floor = neighbour_floor
-        self._top_k = {
-            QueryKind.SINGLE: top_k_single,
-            QueryKind.LIST: top_k_list,
-            QueryKind.AGGREGATE: top_k_aggregate,
-            # Author queries are a plain filter, not a similarity search, so
-            # this bounds the rows handed back rather than the search itself.
-            QueryKind.AUTHOR_FILTER: top_k_list,
-            # Both read every match into one prompt, like AGGREGATE, so the
-            # free-tier budget bounds them the same way.
-            QueryKind.COMPARE_RANK: top_k_aggregate,
-            QueryKind.EXTRACT_COMPILE: top_k_aggregate,
+        self._retrieval = retrieval or RetrievalSettings()
+        self._top_k = self._retrieval.caps()
+        # The kinds that read the matched reels and write something, each to
+        # its own adapter. A table beside `_top_k` rather than a cascade
+        # further down: both are keyed on `QueryKind`, and a kind added to
+        # one and forgotten in the other is the drift that keeping them
+        # apart invites.
+        self._writers = {
+            QueryKind.AGGREGATE: self._aggregate_answer,
+            QueryKind.COMPARE_RANK: self._compare_answer,
+            QueryKind.EXTRACT_COMPILE: self._extract_answer,
         }
 
     def save_reel(self, url: str, *, manual_caption: str | None = None) -> SaveResult:
@@ -164,9 +210,9 @@ class Vault:
         neighbours = [
             neighbour
             for neighbour in self._store.find_similar_captions(
-                caption_embedding, self._neighbour_count
+                caption_embedding, self._retrieval.neighbour_count
             )
-            if neighbour.similarity >= self._neighbour_floor
+            if neighbour.similarity >= self._retrieval.neighbour_floor
         ]
         assignment = self._collection_assigner.assign(post.caption, known, neighbours)
 
@@ -209,6 +255,7 @@ class Vault:
         author_name: str | None,
         caption_embedding: list[float] | None = None,
         user_placed: bool = False,
+        thumbnail_ref: str | None = None,
     ) -> SavedReel:
         """Assemble a reel with both of the embeddings it needs.
 
@@ -235,6 +282,7 @@ class Vault:
             author_handle=author_handle,
             author_name=author_name,
             user_placed=user_placed,
+            thumbnail_ref=thumbnail_ref,
         )
 
     def _persist(self, reel: SavedReel, *, thumbnail_url: str | None) -> SaveResult:
@@ -269,8 +317,16 @@ class Vault:
             # The user answered the question themselves, so this placement
             # carries their authority when later reels are placed near it.
             user_placed=True,
+            # Minted when the question was asked, not now. The extracted URL
+            # is signed and expires, and this result has been sitting in
+            # front of the user for however long they took to answer.
+            thumbnail_ref=pending.thumbnail_ref,
         )
-        return self._persist(reel, thumbnail_url=pending.thumbnail_url)
+        return self._persist(
+            reel,
+            # Nothing left for the caller to mint if it already did.
+            thumbnail_url=None if pending.thumbnail_ref else pending.thumbnail_url,
+        )
 
     def collections(self) -> list[str]:
         """Every collection the vault holds, for offering the user a choice."""
@@ -302,7 +358,7 @@ class Vault:
             subcollection=subcollection,
             user_placed=True,
             embedding=self._embedder.embed(
-                self._embedding_text_for(existing, collection, subcollection)
+                embedding_text_for(existing, collection, subcollection)
             ),
         )
         self._store.update(moved)
@@ -344,7 +400,7 @@ class Vault:
             subcollection=correction.from_subcollection,
             user_placed=correction.from_user_placed,
             embedding=self._embedder.embed(
-                self._embedding_text_for(
+                embedding_text_for(
                     existing,
                     correction.from_collection,
                     correction.from_subcollection,
@@ -353,23 +409,6 @@ class Vault:
         )
         self._store.update(restored)
         return restored
-
-    def _embedding_text_for(
-        self, reel: SavedReel, collection: str, subcollection: str | None
-    ) -> str:
-        """What an already-saved reel should be embedded as if it sat on a
-        different shelf. Everything except the shelf comes from the reel, so
-        a move cannot quietly drop the transcript a reel had already earned
-        — which is exactly what re-deriving the text from the caption alone
-        would do."""
-        return embedding_text(
-            reel.caption,
-            reel.tags,
-            collection,
-            subcollection,
-            reel.transcript_summary,
-            reel.frame_analysis_summary,
-        )
 
     def process_media(self, url: str) -> SavedReel | None:
         """Read the reel's video and record what it said and showed.
@@ -415,6 +454,13 @@ class Vault:
         A failed extraction is recorded as failed rather than left pending.
         Retrying forever on a video that has expired would re-download it on
         every restart for as long as the reel exists.
+
+        An extraction whose frames were never looked at — no vision endpoint
+        configured — is recorded as `FRAMES_UNREAD`, not DONE. It is a real
+        read of the audio and should not be retried on every restart, but it
+        is not the finished job DONE claims, and the difference is invisible
+        in the columns themselves: a reel nobody looked at and a reel with
+        nothing on screen both hold an empty `frame_analysis_summary`.
         """
         normalized = normalize_reel_url(url)
         existing = self._store.find_by_url(normalized)
@@ -452,18 +498,22 @@ class Vault:
             transcript_summary=transcript_summary,
             frame_analysis_raw=extraction.frame_analysis,
             frame_analysis_summary=frame_summary,
-            processing_status=ProcessingStatus.DONE,
-        )
-        # Embedded from the reel as it now is, through the same one function
-        # a move uses. Spelling the parts out here instead would mean two
-        # places had to learn about every future embedded field — the drift
-        # that once let the URL matcher and the dedup key disagree.
-        updated = replace(
-            read,
-            embedding=self._embedder.embed(
-                self._embedding_text_for(read, read.collection, read.subcollection)
+            # DONE claims the video was read. It was only half read when no
+            # vision model was configured to look at the frames, and an
+            # empty `frame_analysis_summary` cannot say which of those
+            # happened on its own.
+            processing_status=(
+                ProcessingStatus.DONE
+                if extraction.frames_read
+                else ProcessingStatus.FRAMES_UNREAD
             ),
         )
+        # Embedded from the reel as it now is, through the same one function
+        # a move and the repair scripts use. Spelling the parts out here
+        # instead would mean several places had to learn about every future
+        # embedded field — the drift that once let the URL matcher and the
+        # dedup key disagree.
+        updated = replace(read, embedding=self._embedder.embed(embedding_text_for(read)))
         self._store.update(updated)
         return updated
 
@@ -513,16 +563,17 @@ class Vault:
                 author=classification.author,
             )
 
-        if classification.collection:
+        # SINGLE is deliberately not routed here. Naming a shelf scopes a
+        # question about one particular reel; it does not answer it, and the
+        # shelf already counts towards the ranking on its own -- the keyword
+        # arm matches `metadata_text`, which is the collection, so every reel
+        # on a shelf the query named is boosted for being there. Reading the
+        # shelf instead threw the question away and returned whichever reel
+        # came back first.
+        if classification.collection and kind is not QueryKind.SINGLE:
             return self._answer_from_collection(query, classification)
 
-        matches = [
-            reel
-            for reel, relevance in self._store.search(
-                self._embedder.embed(query), search_terms(query), self._top_k[kind]
-            )
-            if relevance >= self._match_threshold
-        ]
+        matches = self._matches(query, kind)
 
         if not matches:
             return NoMatch(query=query)
@@ -538,6 +589,18 @@ class Vault:
 
         return SingleItemAnswer(reel=matches[0])
 
+    def _matches(self, query: str, kind: QueryKind) -> list[SavedReel]:
+        """The reels this query actually reaches, capped for its intent and
+        cut at the relevance floor. One place, so every path that asks "what
+        matched?" asks it the same way."""
+        return [
+            reel
+            for reel, relevance in self._store.search(
+                self._embedder.embed(query), search_terms(query), self._top_k[kind]
+            )
+            if relevance >= self._retrieval.match_threshold
+        ]
+
     def _written_answer(
         self, query: str, kind: QueryKind, reels: list[SavedReel]
     ) -> Answer | None:
@@ -551,33 +614,48 @@ class Vault:
         will write a summary of everything, and asked for a list will write
         prose about one.
         """
-        sources = [SummarySource.of(reel) for reel in reels]
+        writer = self._writers.get(kind)
+        if writer is None:
+            return None
+        return writer(query, [SummarySource.of(reel) for reel in reels], reels)
 
-        if kind is QueryKind.AGGREGATE:
-            return AggregateAnswer(
-                text=self._summarizer.summarize(query, sources), reels=reels
-            )
+    def _aggregate_answer(
+        self, query: str, sources: list[SummarySource], reels: list[SavedReel]
+    ) -> Answer:
+        return AggregateAnswer(
+            text=self._summarizer.summarize(query, sources), reels=reels
+        )
 
-        if kind is QueryKind.COMPARE_RANK:
-            comparison = self._comparer.compare(query, sources)
-            return CompareAnswer(
-                text=comparison.text, criterion=comparison.criterion, reels=reels
-            )
+    def _compare_answer(
+        self, query: str, sources: list[SummarySource], reels: list[SavedReel]
+    ) -> Answer:
+        comparison = self._comparer.compare(query, sources)
+        return CompareAnswer(
+            text=comparison.text, criterion=comparison.criterion, reels=reels
+        )
 
-        if kind is QueryKind.EXTRACT_COMPILE:
-            return ExtractAnswer(
-                items=self._item_extractor.extract_items(query, sources), reels=reels
-            )
-
-        return None
+    def _extract_answer(
+        self, query: str, sources: list[SummarySource], reels: list[SavedReel]
+    ) -> Answer:
+        return ExtractAnswer(
+            items=self._item_extractor.extract_items(query, sources), reels=reels
+        )
 
     def _answer_from_collection(
         self, query: str, classification: QueryClassification
     ) -> Answer:
-        """The user named a shelf, so read the shelf. Similarity ranking has
-        nothing to add here and plenty to lose: "5yrs ago this wasn't a thing"
-        genuinely belongs to Sales, but no query about sales will ever score
-        close enough to a caption like that to clear the threshold."""
+        """The user named a shelf and asked for what is on it, so read the
+        shelf. Similarity ranking has nothing to add here and plenty to lose:
+        "5yrs ago this wasn't a thing" genuinely belongs to Sales, but no
+        query about sales will ever score close enough to a caption like that
+        to clear the threshold.
+
+        Only for the kinds that answer *from* a shelf — browsing it,
+        summarizing it, ranking across it. A question about one particular
+        reel that happens to name a shelf is not one of them: `ask` keeps
+        those on the search path, because there the shelf is a scope and the
+        question is still the thing being asked.
+        """
         collection = classification.collection or ""
         kind = classification.kind
         reels = self._store.find_by_collection(collection)[: self._top_k[kind]]
@@ -588,8 +666,5 @@ class Vault:
         written = self._written_answer(query, kind, reels)
         if written is not None:
             return written
-
-        if kind is QueryKind.SINGLE:
-            return SingleItemAnswer(reel=reels[0])
 
         return ListAnswer(query=query, reels=reels, collection=collection)

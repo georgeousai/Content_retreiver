@@ -56,7 +56,11 @@ class VideoMediaExtractor:
         downloader: VideoDownloader,
         transcriber: Transcriber,
         frame_sampler: FrameSampler,
-        frame_analyzer: FrameAnalyzer,
+        # None when no vision endpoint is configured. Deliberately not a
+        # do-nothing analyzer returning "": that made "nobody looked" and
+        # "nothing was on screen" the same value, and the reel was filed as
+        # fully read either way. Absent means absent, and `extract` says so.
+        frame_analyzer: FrameAnalyzer | None,
         max_frames: int = MAX_FRAMES,
     ) -> None:
         self._downloader = downloader
@@ -73,6 +77,11 @@ class VideoMediaExtractor:
         transcribed cleanly but whose frames could not be read is still worth
         far more than the caption alone, so one failing does not discard the
         other's work.
+
+        `frames_read` on the result separates a third case from those two:
+        the frames were never sent anywhere, because no vision model is
+        configured. That is not a failure to retry and not a finished read,
+        and the caller needs to be able to tell.
         """
         # TemporaryDirectory removes the tree on the way out of the block —
         # on success, on failure, and on an exception thrown through it. That
@@ -86,6 +95,7 @@ class VideoMediaExtractor:
             extraction = MediaExtraction(
                 transcript=self._transcribe(video),
                 frame_analysis=self._read_frames(video),
+                frames_read=self._frame_analyzer is not None,
             )
 
         if extraction.is_empty():
@@ -108,6 +118,9 @@ class VideoMediaExtractor:
             return ""
 
     def _read_frames(self, video: Path) -> str:
+        if self._frame_analyzer is None:
+            return ""
+
         try:
             frames = self._frame_sampler.sample(video, self._max_frames)
         except Exception as exc:

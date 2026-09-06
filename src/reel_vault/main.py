@@ -46,7 +46,21 @@ logger = logging.getLogger(__name__)
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     config = load_config()
+    bot = build_bot(build_vault(config), config.telegram_bot_token)
+    bot.run()
 
+
+def build_vault(config: Config) -> Vault:
+    """Every adapter this app runs on, wired to whatever configuration names.
+
+    Public, and separate from `main`, because the bot is not the only thing
+    that wants a real vault: the debugger walkthrough under `scripts/` wants
+    the same one. Building its own copy is how that script came to be
+    constructing a `Groq` client, importing an `adapters.groq_llm` module and
+    reading a `config.groq_api_key` — three things that had all been gone for
+    months without anything noticing, because nothing it duplicated was ever
+    run or type-checked alongside the wiring it was a copy of.
+    """
     logger.info(
         "Text model: %s at %s", config.llm.model, config.llm.base_url
     )
@@ -64,7 +78,7 @@ def main() -> None:
     )
     condenser_client = chat_client(config.condenser)
 
-    vault = Vault(
+    return Vault(
         caption_fetcher=CompositeCaptionFetcher(
             [OEmbedCaptionFetcher(), YtDlpCaptionFetcher()]
         ),
@@ -82,9 +96,6 @@ def main() -> None:
         media_extractor=_build_media_extractor(config),
     )
 
-    bot = build_bot(vault, config.telegram_bot_token)
-    bot.run()
-
 
 def _build_media_extractor(config: Config) -> MediaExtractor:
     """The video-reading pipeline, assembled from its four steps.
@@ -93,8 +104,15 @@ def _build_media_extractor(config: Config) -> MediaExtractor:
     transcription is the larger half of what a video adds, and refusing to
     start the bot over an optional setting would trade a working vault for a
     complete one.
+
+    The analyzer is left as None rather than stood in for by one that returns
+    nothing. A do-nothing analyzer made an unset `VISION_API_KEY` — a
+    forgotten line in an `.env` — indistinguishable from a video with no text
+    on screen: every such reel was filed as fully read, and adding the key
+    later would never have brought any of them back. Those reels are now
+    marked `frames_unread` and can be found again.
     """
-    frame_analyzer: FrameAnalyzer
+    frame_analyzer: FrameAnalyzer | None = None
     if config.vision is not None:
         logger.info(
             "Vision model: %s at %s", config.vision.model, config.vision.base_url
@@ -105,9 +123,10 @@ def _build_media_extractor(config: Config) -> MediaExtractor:
     else:
         logger.warning(
             "No VISION_API_KEY is set — reels will be transcribed, but "
-            "on-screen text will not be read."
+            "on-screen text will not be read. They are recorded as "
+            "'frames_unread' rather than done, so setting a key later can "
+            "pick them up."
         )
-        frame_analyzer = _NoFrameAnalysis()
 
     return VideoMediaExtractor(
         downloader=YtDlpVideoDownloader(),
@@ -117,15 +136,6 @@ def _build_media_extractor(config: Config) -> MediaExtractor:
         frame_sampler=SceneDetectFrameSampler(),
         frame_analyzer=frame_analyzer,
     )
-
-
-class _NoFrameAnalysis:
-    """Stands in when no vision endpoint is configured. Returning nothing is
-    already how the pipeline reports "the frames could not be read", so this
-    needs no special handling anywhere downstream."""
-
-    def analyze(self, frames: list[bytes]) -> str:
-        return ""
 
 
 if __name__ == "__main__":

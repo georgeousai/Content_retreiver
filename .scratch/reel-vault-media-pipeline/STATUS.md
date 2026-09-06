@@ -678,6 +678,87 @@ reel. The query kind is right and the extractor works; it is being handed an
 empty source list. Whether a whole-vault sweep should bypass similarity is a
 design question, not a bug fix.
 
+## Closed: the code review of this branch (2026-09-06)
+
+A two-axis review (standards, spec) of `master...HEAD` returned seven
+high-severity findings and five medium. All twelve are fixed on this branch.
+The ones worth remembering:
+
+- **The truncation audit missed the seventh adapter.** `VisionFrameAnalyzer`
+  cannot share `_ChatAdapter._complete` — it sends image parts and no system
+  prompt — and the audit's own phrasing, "all six sharing `_complete`",
+  defined it away. The default vision model is a reasoning model, so it fails
+  exactly the way the condenser did: a truncated reply returned `""`, the
+  frames were recorded as unreadable, and the reel went to `FAILED` and was
+  never retried. The `finish_reason` check is now a module-level
+  `content_of()` that every reply in the app is read through, `_complete`
+  included. **The general lesson: an audit scoped by "everything that shares
+  this helper" cannot find the call site that could not share it.**
+
+- **A `SINGLE` query naming a shelf returned the newest reel on it.** `ask`
+  checked `classification.collection` before searching, and the intent prompt
+  sets `collection` on any query that names a shelf — so "find that reel about
+  AI where they explain transformers" answered with whichever AI reel was
+  saved last, discarding the question and answering the only part of it the
+  user could already see. `SINGLE` now stays on the search path. The shelf
+  still counts, through the arm built for it: the keyword arm matches
+  `metadata_text`, which is the collection, so every reel on a named shelf is
+  boosted for being there. Reading the shelf added nothing that ranking did
+  not already do, and cost the question.
+
+  The fake classifier was part of why this survived: it set `collection` for
+  every kind *except* `SINGLE`, so no seam test could reach the branch. Fixed
+  in `tests/fakes.py` — a fake kinder than the thing it stands in for is a
+  test suite agreeing with itself.
+
+- **`PostgresReelStore.update` wrote 10 of 17 columns** while the port says
+  "overwrite" and the in-memory store used by every seam test overwrote
+  wholesale. No seam test could see the difference, because the fake was the
+  one behaving correctly. Now wholesale, and pinned by two contract tests
+  against real Postgres (`test_postgres_store_integration.py`) — the only
+  layer where the two implementations can be held to one meaning.
+
+- **`reply_photo` was guarded on the save path and bare on the query path.**
+  One stale `file_id` raised out of the middle of the card loop, so the user
+  lost every remaining reel *and* the synthesized answer above them. Both go
+  through one `_send_with_picture` now.
+
+- **Three call sites spelled out `embedding_text`'s six arguments.** The rule
+  they broke is written in `vault.py` itself. Now one `embedding_text_for()`
+  in `search.py`, used by the vault and both repair scripts, so a new embedded
+  field cannot reach live reels and miss backfilled ones.
+
+- **`scripts/dump_reel_frames.py` mislabelled its own output.** It zipped the
+  sampler's returned frames against every index the chooser picked, but the
+  sampler silently drops an index it cannot decode — so every label after the
+  first gap slid by one, mislabelling precisely the frame-to-timestamp
+  correspondence the diagnostic exists to establish. It now labels against
+  the indexes that actually decoded, and records the undecodable ones, which
+  are a finding in their own right.
+
+### Accepted deviations from spec, now written down
+
+Both were real behaviour the specs do not describe. Neither is being removed —
+each was a measured decision — but going unrecorded is what made them read as
+scope creep to a reviewer:
+
+- **Collection-scoped classification.** `QueryClassification.collection`,
+  `ReelStore.find_by_collection` and `_answer_from_collection` are in neither
+  spec; the query-answering spec says `classify` returns "one of four kinds
+  ... plus an optional extracted author string". They exist because "show me
+  all my sales reels" answered "Nothing in the vault matches that" with two
+  Sales reels sitting in the vault. Rationale was in `known-issues.md` only.
+
+- **The `substance.has_substance` gate before the condenser.** The spec
+  defines `condense(raw_text) -> str` with no bypass. Whisper's `"."` on a
+  silent clip is not a judgement call, and paying a model call per reel to
+  have one made is waste. Documented above as a cost saving; recorded here as
+  a spec deviation too.
+
+- **`ProcessingStatus.SKIPPED`** beyond the spec's `pending/done/failed` was
+  required by issue 01 and is correct; **`FRAMES_UNREAD`** is new on this
+  branch (below).
+
 ## Still open
 
 - **`reasoning_effort="medium"` on the item extractor, untested.** Low fixes
@@ -713,6 +794,14 @@ design question, not a bug fix.
   the four summaries the truncation destroyed (see below); it is listed here
   because it will be worth running again after the adapter audit above.
 - **A startup sweep for orphaned `reel-vault-*` workspaces** (above).
+- **Reels already written as `done` while no vision key was set cannot be
+  told apart.** Going forward they are recorded as `FRAMES_UNREAD`, so a
+  vision key added later can find them. Rows written before that change are
+  `done` with an empty `frame_analysis_summary` and are indistinguishable
+  from a video that genuinely had nothing on screen — the same
+  unrecoverability that motivated the fix, applied to the rows that predate
+  it. Re-reading them all is the same job as the RAG-vs-CAG frame-fabrication
+  repair above, and would be done by the same pass.
 - **The frame budget clusters at the end of a long reel** (above).
 - **Per-user separation** — still the architectural decision the
   query-answering STATUS says to settle first. Nothing here changes that.

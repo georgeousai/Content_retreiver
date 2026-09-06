@@ -37,9 +37,22 @@ from reel_vault.adapters.embedder import LocalEmbedder
 from reel_vault.adapters.llm import ChatContentCondenser, chat_client
 from reel_vault.adapters.postgres_store import PostgresReelStore
 from reel_vault.config import load_config
-from reel_vault.models import SavedReel
-from reel_vault.search import embedding_text
+from reel_vault.models import ProcessingStatus, SavedReel
+from reel_vault.search import embedding_text_for
 from reel_vault.substance import has_substance
+
+
+def summary_missing(raw: str, summary: str) -> bool:
+    """One half of a reel's media text whose summary went missing while the
+    raw words are still there.
+
+    The single definition of "missing" this script runs on. Selecting a reel
+    and deciding which of its two halves to re-condense are the same
+    question asked twice, and spelling the condition out at both sites is
+    how they come to disagree — the script would then pick a reel up and
+    then condense neither half of it.
+    """
+    return has_substance(raw) and not summary.strip()
 
 
 def worth_retrying(reel: SavedReel) -> bool:
@@ -52,13 +65,9 @@ def worth_retrying(reel: SavedReel) -> bool:
     difference: otherwise this would re-condense that reel on every run
     forever, spend a call each time, and report it as repaired.
     """
-    return (
-        (has_substance(reel.transcript_raw) and not reel.transcript_summary.strip())
-        or (
-            has_substance(reel.frame_analysis_raw)
-            and not reel.frame_analysis_summary.strip()
-        )
-    )
+    return summary_missing(
+        reel.transcript_raw, reel.transcript_summary
+    ) or summary_missing(reel.frame_analysis_raw, reel.frame_analysis_summary)
 
 
 def main(apply: bool) -> int:
@@ -82,9 +91,9 @@ def main(apply: bool) -> int:
 
             transcript_summary = reel.transcript_summary
             frame_summary = reel.frame_analysis_summary
-            if has_substance(reel.transcript_raw) and not transcript_summary.strip():
+            if summary_missing(reel.transcript_raw, transcript_summary):
                 transcript_summary = condenser.condense(reel.transcript_raw)
-            if has_substance(reel.frame_analysis_raw) and not frame_summary.strip():
+            if summary_missing(reel.frame_analysis_raw, frame_summary):
                 frame_summary = condenser.condense(reel.frame_analysis_raw)
 
             if (
@@ -111,20 +120,20 @@ def main(apply: bool) -> int:
                     transcript_summary=transcript_summary,
                     frame_analysis_summary=frame_summary,
                 )
+                # A repaired reel is no longer a failed read. Written back
+                # still FAILED it stayed indistinguishable from one that
+                # never got its summary, so the next run of this script
+                # would pick it up again and the vault would go on
+                # reporting a reel it had already fixed as broken. Only
+                # FAILED is promoted, and only once nothing is missing:
+                # a reel whose frames were never looked at is a different
+                # statement, and stays the one it was.
+                if read.processing_status is ProcessingStatus.FAILED and not (
+                    worth_retrying(read)
+                ):
+                    read = replace(read, processing_status=ProcessingStatus.DONE)
                 store.update(
-                    replace(
-                        read,
-                        embedding=embedder.embed(
-                            embedding_text(
-                                read.caption,
-                                read.tags,
-                                read.collection,
-                                read.subcollection,
-                                read.transcript_summary,
-                                read.frame_analysis_summary,
-                            )
-                        ),
-                    )
+                    replace(read, embedding=embedder.embed(embedding_text_for(read)))
                 )
 
     print(

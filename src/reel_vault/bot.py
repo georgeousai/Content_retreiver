@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+from dataclasses import replace
 
 from telegram import (
     CallbackQuery,
@@ -408,8 +409,39 @@ class ReelVaultBot:
                 message, result.reel, _format_saved_reply(result.reel, already_saved=True)
             )
         elif isinstance(result, NeedsCollectionChoice):
-            self._pending_collection_choice[message.chat_id] = result
-            await message.reply_text(_format_collection_prompt(result.known_collections))
+            self._pending_collection_choice[message.chat_id] = (
+                await self._ask_for_collection(message, result)
+            )
+
+    async def _ask_for_collection(
+        self, message: Message, pending: NeedsCollectionChoice
+    ) -> NeedsCollectionChoice:
+        """Ask where this reel goes, showing the reel while asking.
+
+        The question doubles as the upload that mints the file_id, exactly as
+        the save confirmation does for a reel that needed no question. That
+        ordering is the whole point: the extracted thumbnail URL is signed
+        and expires, and this result then sits in front of the user for
+        however long they take to answer. Carried across that pause as a raw
+        URL, a save paused overnight and finished in the morning mints its
+        durable reference from a link that has already gone — the exact
+        expiry this design existed to prevent.
+
+        It also puts the picture in front of the user at the one moment they
+        are being asked to make a filing decision, which is when seeing the
+        reel helps most.
+        """
+        text = _format_collection_prompt(pending.known_collections)
+        if not pending.thumbnail_url:
+            await message.reply_text(text)
+            return pending
+
+        # No parse mode: this prompt is a plain list of the user's own
+        # collection names, which are not escaped for markup.
+        file_id = await _send_with_picture(
+            message, photo=pending.thumbnail_url, text=text, markup=None, parse_mode=None
+        )
+        return replace(pending, thumbnail_ref=file_id) if file_id else pending
 
     async def _confirm_save(self, message: Message, result: Saved) -> None:
         """Confirm the save with the reel's own picture where there is one.
@@ -424,29 +456,24 @@ class ReelVaultBot:
         # The confirmation is where a misfiling is most likely to be spotted,
         # so it carries the same Move button every other card does.
         markup = _move_keyboard(shortcode_of(result.reel.url) or "")
-        if not result.thumbnail_url:
-            await message.reply_text(
-                text, parse_mode=ParseMode.HTML, reply_markup=markup
+
+        if result.thumbnail_url:
+            file_id = await _send_with_picture(
+                message, photo=result.thumbnail_url, text=text, markup=markup
+            )
+            if file_id:
+                self._vault.attach_thumbnail(result.reel.url, file_id)
+            return
+
+        if result.reel.thumbnail_ref:
+            # Already minted: this save paused for a collection choice, and
+            # the question that paused it is what uploaded the picture.
+            await _send_with_picture(
+                message, photo=result.reel.thumbnail_ref, text=text, markup=markup
             )
             return
 
-        try:
-            sent = await message.reply_photo(
-                photo=result.thumbnail_url,
-                caption=text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=markup,
-            )
-        except TelegramError as exc:
-            # A picture is a nicety; the reel is already saved either way.
-            logger.info("Could not send thumbnail for %s: %s", result.reel.url, exc)
-            await message.reply_text(
-                text, parse_mode=ParseMode.HTML, reply_markup=markup
-            )
-            return
-
-        if sent.photo:
-            self._vault.attach_thumbnail(result.reel.url, sent.photo[-1].file_id)
+        await message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
     async def _handle_refile(self, message: Message, url: str, reply: str) -> None:
         collection, subcollection = _parse_collection_reply(reply)
@@ -590,11 +617,8 @@ class ReelVaultBot:
         body = text if text is not None else _format_reel_detail(reel)
         markup = _move_keyboard(shortcode_of(reel.url) or "")
         if reel.thumbnail_ref:
-            await message.reply_photo(
-                photo=reel.thumbnail_ref,
-                caption=body,
-                parse_mode=ParseMode.HTML,
-                reply_markup=markup,
+            await _send_with_picture(
+                message, photo=reel.thumbnail_ref, text=body, markup=markup
             )
         else:
             await message.reply_text(
@@ -607,6 +631,37 @@ class ReelVaultBot:
         the text list above it."""
         for reel in reels:
             await self._reply_with_reel(message, reel)
+
+
+async def _send_with_picture(
+    message: Message,
+    *,
+    photo: str,
+    text: str,
+    markup: InlineKeyboardMarkup | None,
+    parse_mode: str | None = ParseMode.HTML,
+) -> str | None:
+    """Send `text` under `photo`, dropping to a plain message if Telegram
+    will not take the picture. Returns the durable `file_id` Telegram minted,
+    where it minted one.
+
+    Every picture this bot sends goes through here. An unguarded
+    `reply_photo` is a whole reply lost to one stale file_id or one expired
+    CDN URL — and inside a run of reel cards, every card after it as well,
+    plus the answer they were the evidence for. The confirmation path had
+    this guard and the query path did not, which is exactly the shape a
+    second copy of a call takes when it drifts.
+    """
+    try:
+        sent = await message.reply_photo(
+            photo=photo, caption=text, parse_mode=parse_mode, reply_markup=markup
+        )
+    except TelegramError as exc:
+        # A picture is a nicety; the reply is the point.
+        logger.info("Could not send picture: %s", exc)
+        await message.reply_text(text, parse_mode=parse_mode, reply_markup=markup)
+        return None
+    return sent.photo[-1].file_id if sent.photo else None
 
 
 def build_bot(vault: Vault, token: str) -> ReelVaultBot:

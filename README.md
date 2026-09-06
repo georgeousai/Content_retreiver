@@ -192,7 +192,7 @@ LLM_API_KEY=your-key
 VISION_API_KEY=your-vision-key
 ```
 
-`VISION_API_KEY` is optional. Without it reels are still downloaded and transcribed; only the reading of on-screen text is off, and the bot says so at startup rather than refusing to run.
+`VISION_API_KEY` is optional. Without it reels are still downloaded and transcribed; only the reading of on-screen text is off, and the bot says so at startup rather than refusing to run. Those reels are recorded as `frames_unread` rather than `done`, so they stay distinguishable from reels whose frames were read and had nothing on them — set a key later and they can be found again.
 
 To run on a different provider, add its endpoint — no code changes:
 

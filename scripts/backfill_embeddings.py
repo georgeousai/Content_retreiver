@@ -29,7 +29,7 @@ from dataclasses import replace
 from reel_vault.adapters.embedder import LocalEmbedder
 from reel_vault.adapters.postgres_store import PostgresReelStore
 from reel_vault.config import load_config
-from reel_vault.search import embedding_text
+from reel_vault.search import embedding_text_for
 
 
 def main(apply: bool) -> int:
@@ -47,15 +47,11 @@ def main(apply: bool) -> int:
                 continue
             seen.add(reel.url)
 
-            new_text = embedding_text(
-                reel.caption,
-                reel.tags,
-                reel.collection,
-                reel.subcollection,
-                reel.transcript_summary,
-                reel.frame_analysis_summary,
-            )
-            new_embedding = embedder.embed(new_text)
+            # Through the same one function the vault embeds with. Spelled
+            # out here instead, this script would go on embedding reels the
+            # way it was written to and the vault would embed new ones the
+            # way it does now, the moment a field is added to either.
+            new_embedding = embedder.embed(embedding_text_for(reel))
 
             if new_embedding == reel.embedding:
                 unchanged += 1

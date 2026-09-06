@@ -645,3 +645,105 @@ async def test_matching_reels_that_list_nothing_is_not_reported_as_no_match(
     reply = message.reply_text.await_args.args[0]
     assert reply != "Nothing in the vault matches that."
     assert "none of them" in reply.lower()
+
+
+async def test_a_stale_file_id_costs_one_card_not_the_rest_of_the_answer(
+    bot: ReelVaultBot,
+) -> None:
+    """The confirmation path guarded `reply_photo` and the query path did
+    not. One file_id Telegram no longer honours therefore raised out of the
+    middle of the card loop: the user lost every remaining reel and the
+    answer they were the evidence for, over a picture."""
+    bot._vault = make_vault(
+        captions={
+            "https://instagram.com/reel/A1": "ai agents explained",
+            "https://instagram.com/reel/A2": "ai agents in production",
+        },
+    )
+    _save_with_picture(bot._vault, "https://instagram.com/reel/A1", "", "dead-file-id")
+    _save_with_picture(bot._vault, "https://instagram.com/reel/A2", "", "file-2")
+
+    message = _make_message("show me my ai agents reels")
+
+    def photo(*args, **kwargs):
+        if kwargs["photo"] == "dead-file-id":
+            raise TelegramError("wrong file identifier")
+        return _photo_reply(kwargs["photo"])
+
+    message.reply_photo.side_effect = photo
+    await bot._on_message(_make_update(message), MagicMock())
+
+    # The good card still went as a picture...
+    photos = {
+        call.kwargs["photo"] for call in message.reply_photo.await_args_list
+    }
+    assert photos == {"dead-file-id", "file-2"}
+    # ...and the dead one fell back to text rather than taking the reply down.
+    text_replies = [
+        call.args[0] for call in message.reply_text.await_args_list if call.args
+    ]
+    assert any("instagram.com/p/A1" in reply for reply in text_replies)
+
+
+async def test_the_collection_question_mints_the_picture_before_the_pause(
+    bot: ReelVaultBot,
+) -> None:
+    """The extracted thumbnail URL is signed and expires, and a save paused
+    on a collection choice sits in front of the user for as long as they take
+    to answer. Minting the durable reference when the question is asked —
+    rather than carrying the raw URL across that pause — is what keeps an
+    overnight answer from finishing with a link that has already gone. It
+    also shows the reel at the moment the user is asked where to file it.
+    """
+    url = "https://instagram.com/reel/PIC"
+    bot._vault = make_vault(
+        captions={
+            url: ExtractedPost(
+                caption="5yrs ago this wasn't a thing",
+                thumbnail_url="https://cdn/expiring.jpg",
+            )
+        },
+        assignments={
+            "5yrs ago this wasn't a thing": CollectionAssignment(
+                collection=UNCATEGORIZED
+            )
+        },
+    )
+
+    asking = _make_message(url, chat_id=7)
+    asking.reply_photo.return_value = _photo_reply("tg-file-id")
+    await bot._on_message(_make_update(asking, chat_id=7), chat_id_ignored := MagicMock())
+
+    # The question itself was the upload.
+    assert asking.reply_photo.await_args.kwargs["photo"] == "https://cdn/expiring.jpg"
+    assert bot._pending_collection_choice[7].thumbnail_ref == "tg-file-id"
+
+    answering = _make_message("Old Trends", chat_id=7)
+    await bot._on_message(_make_update(answering, chat_id=7), chat_id_ignored)
+
+    saved = bot._vault._store.find_by_url("https://instagram.com/p/PIC")
+    assert saved is not None
+    assert saved.collection == "Old Trends"
+    # Kept from the question, and never re-minted from the expired URL.
+    assert saved.thumbnail_ref == "tg-file-id"
+    assert answering.reply_photo.await_args.kwargs["photo"] == "tg-file-id"
+
+
+async def test_a_collection_question_without_a_picture_is_still_just_asked(
+    bot: ReelVaultBot,
+) -> None:
+    url = "https://instagram.com/reel/NOPIC"
+    bot._vault = make_vault(
+        captions={url: "5yrs ago this wasn't a thing"},
+        assignments={
+            "5yrs ago this wasn't a thing": CollectionAssignment(
+                collection=UNCATEGORIZED
+            )
+        },
+    )
+
+    message = _make_message(url, chat_id=8)
+    await bot._on_message(_make_update(message, chat_id=8), MagicMock())
+
+    message.reply_photo.assert_not_awaited()
+    assert bot._pending_collection_choice[8].thumbnail_ref is None

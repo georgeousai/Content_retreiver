@@ -5,7 +5,7 @@ from collections.abc import Mapping
 import pytest
 
 from reel_vault.models import CollectionAssignment, ExtractedPost
-from reel_vault.vault import Vault
+from reel_vault.vault import RetrievalSettings, Vault
 from tests.fakes import (
     FakeCaptionFetcher,
     FakeCollectionAssigner,
@@ -42,7 +42,7 @@ def make_vault(
     query_intent: FakeQueryIntent | None = None,
     aggregate_triggers: tuple[str, ...] = ("give me all", "summarize", "every"),
     match_threshold: float = 0.1,
-    **top_k_overrides: int,
+    **retrieval_overrides: float,
 ) -> Vault:
     return Vault(
         caption_fetcher=FakeCaptionFetcher(captions or {}),
@@ -68,6 +68,11 @@ def make_vault(
         # Verbatim by default so a test can assert the video's words are
         # findable without also having to model what condensing did to them.
         condenser=condenser if condenser is not None else FakeCondenser(verbatim=True),
-        match_threshold=match_threshold,
-        **top_k_overrides,
+        # Tests name the knobs individually; the vault takes them as one
+        # value. Assembled here so a test that cares about one number does
+        # not have to build the whole settings object to say so.
+        retrieval=RetrievalSettings(
+            match_threshold=match_threshold,
+            **retrieval_overrides,  # type: ignore[arg-type]
+        ),
     )

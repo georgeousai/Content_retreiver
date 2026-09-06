@@ -28,6 +28,15 @@ class ProcessingStatus(Enum):
     # claims the video was actually read, and from PENDING, which would queue
     # every old reel for download the next time the bot starts.
     SKIPPED = "skipped"
+    # Heard but not looked at: the audio was transcribed and no vision
+    # endpoint was configured, so the frames were never sent anywhere.
+    # Distinct from DONE for the same reason SKIPPED is -- an empty
+    # `frame_analysis_summary` under DONE is a claim that the frames were
+    # read and carried nothing, which is indistinguishable from never having
+    # looked. Not PENDING, because these reels are not interrupted work:
+    # re-queueing them would re-download every one of them on the next
+    # restart and read their frames with the same absent model.
+    FRAMES_UNREAD = "frames_unread"
 
 
 @dataclass(frozen=True)
@@ -40,6 +49,11 @@ class MediaExtraction:
 
     transcript: str = ""
     frame_analysis: str = ""
+    # Whether the frames were looked at at all. False means no vision model
+    # was configured, so `frame_analysis` is empty because nothing read them
+    # -- not because there was nothing on them. The caller records that
+    # difference rather than filing both as a finished read.
+    frames_read: bool = True
 
     def is_empty(self) -> bool:
         return not self.transcript.strip() and not self.frame_analysis.strip()
@@ -150,7 +164,15 @@ class NeedsCollectionChoice:
     author_handle: str | None
     author_name: str | None
     known_collections: dict[str, list[str]]
+    # The extracted (expiring) image URL, and the durable reference minted
+    # from it. The ref is what a finished save should carry: this result sits
+    # in front of the user for as long as they take to answer, and an
+    # Instagram thumbnail URL is signed and eventually 404s, so a save paused
+    # overnight would otherwise finish with a picture that no longer loads.
+    # Only the transport can mint one, so it fills this in and hands the
+    # result back.
     thumbnail_url: str | None = None
+    thumbnail_ref: str | None = None
 
 
 SaveResult = Saved | AlreadySaved | ExtractionFailed | NeedsCollectionChoice

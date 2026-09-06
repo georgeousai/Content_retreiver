@@ -175,7 +175,17 @@ class PostgresReelStore:
         return cursor.rowcount > 0
 
     def update(self, reel: SavedReel) -> None:
-        """Everything about a saved reel that can change after the save.
+        """Overwrite an already-saved reel, keyed on its URL — every column
+        except the key and the date it was first saved.
+
+        Wholesale rather than a chosen subset, because the port says
+        "overwrite" and the in-memory store used by every seam test does
+        exactly that. A partial UPDATE agrees with it on the fields today's
+        callers happen to change and diverges silently on the rest: a caller
+        that edited a caption or a tag list would have been handed a reel
+        back with the edit applied, the tests would have passed, and the
+        column would never have moved. There is no seam test that can catch
+        that, so the two implementations have to mean the same thing.
 
         The media columns travel with the embedding rather than in a setter
         of their own: a transcript written without re-embedding would be
@@ -183,23 +193,30 @@ class PostgresReelStore:
         writes would make that an easy mistake to make twice.
         """
         self._conn.execute(
-            "UPDATE saved_reels SET collection = %s, subcollection = %s, "
-            "embedding = %s, metadata_text = %s, user_placed = %s, "
-            "transcript_raw = %s, transcript_summary = %s, "
+            "UPDATE saved_reels SET caption = %s, tags = %s, embedding = %s, "
+            "caption_embedding = %s, collection = %s, subcollection = %s, "
+            "author_handle = %s, author_name = %s, thumbnail_ref = %s, "
+            "user_placed = %s, transcript_raw = %s, transcript_summary = %s, "
             "frame_analysis_raw = %s, frame_analysis_summary = %s, "
-            "processing_status = %s "
+            "processing_status = %s, metadata_text = %s "
             "WHERE normalized_url = %s",
             (
+                reel.caption,
+                reel.tags,
+                Vector(reel.embedding),
+                Vector(reel.caption_embedding) if reel.caption_embedding else None,
                 reel.collection,
                 reel.subcollection,
-                Vector(reel.embedding),
-                metadata_text(reel.tags, reel.collection, reel.subcollection),
+                reel.author_handle,
+                reel.author_name,
+                reel.thumbnail_ref,
                 reel.user_placed,
                 reel.transcript_raw,
                 reel.transcript_summary,
                 reel.frame_analysis_raw,
                 reel.frame_analysis_summary,
                 reel.processing_status.value,
+                metadata_text(reel.tags, reel.collection, reel.subcollection),
                 reel.url,
             ),
         )

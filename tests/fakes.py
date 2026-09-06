@@ -298,7 +298,12 @@ class FakeQueryIntent:
             return QueryClassification(kind=QueryKind.LIST, collection=named)
         if any(trigger in lowered for trigger in self._aggregate_triggers):
             return QueryClassification(kind=QueryKind.AGGREGATE, collection=named)
-        return QueryClassification(kind=QueryKind.SINGLE)
+        # A SINGLE query names a shelf exactly as the others do -- the real
+        # prompt sets `collection` on any query naming one, whatever shape of
+        # answer it asks for. Leaving it off here made the fake kinder than
+        # the classifier it stands in for, and no seam test could reach the
+        # branch that reads a shelf for a question about one reel on it.
+        return QueryClassification(kind=QueryKind.SINGLE, collection=named)
 
 
 class FakeSummarizer:

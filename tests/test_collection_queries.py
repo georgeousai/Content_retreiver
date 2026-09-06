@@ -13,10 +13,13 @@ from reel_vault.models import (
     ExtractedPost,
     ListAnswer,
     NoMatch,
+    QueryClassification,
+    QueryKind,
     Saved,
+    SingleItemAnswer,
 )
 from tests.conftest import make_vault
-from tests.fakes import FakeSummarizer, InMemoryReelStore
+from tests.fakes import FakeQueryIntent, FakeSummarizer, InMemoryReelStore
 
 POSTS = {
     "https://instagram.com/reel/s1": ExtractedPost(
@@ -131,3 +134,78 @@ def test_a_topic_that_is_not_a_collection_still_searches_semantically() -> None:
     assert isinstance(answer, ListAnswer)
     assert answer.collection is None
     assert any("bicep" in reel.caption for reel in answer.reels)
+
+
+def _shelf_scoped_single(query: str, collection: str = "Sales") -> FakeQueryIntent:
+    """A query the classifier read as "one reel, off this shelf" — the shape
+    the real prompt produces for any specific question that names a shelf."""
+    return FakeQueryIntent(
+        classifications={
+            query: QueryClassification(kind=QueryKind.SINGLE, collection=collection)
+        }
+    )
+
+
+def _sales_vault_saved_in_order(*urls: str, query: str, **overrides) -> tuple:
+    store = InMemoryReelStore()
+    vault = make_vault(
+        captions=POSTS,
+        assignments=ASSIGNMENTS,
+        store=store,
+        query_intent=_shelf_scoped_single(query),
+        **overrides,
+    )
+    for url in urls:
+        assert isinstance(vault.save_reel(url), Saved)
+    return vault, store
+
+
+def test_a_specific_question_about_a_shelf_is_answered_by_the_question() -> None:
+    """Naming a shelf scopes a single-item question; it does not answer it.
+
+    The shelf was read instead of searched, so "that Sales reel about being
+    asked where you got my number" came back as whichever Sales reel the
+    store handed over first, with the rest of the question discarded. The
+    two Sales reels are saved in the order that makes the first row the
+    wrong one, since a shelf whose first row happens to be right cannot
+    tell the bug from the fix.
+    """
+    query = "that Sales reel about a cold caller being asked where you got my number"
+    vault, _ = _sales_vault_saved_in_order(
+        "https://instagram.com/reel/s2",
+        "https://instagram.com/reel/s1",
+        query=query,
+    )
+
+    answer = vault.ask(query)
+
+    assert isinstance(answer, SingleItemAnswer)
+    assert answer.reel.url == "https://instagram.com/p/s1"
+
+
+def test_naming_a_shelf_does_not_outrank_the_reel_the_question_describes() -> None:
+    """The shelf is a scope, not a verdict. It still counts — the keyword arm
+    matches a reel's collection, so every Sales reel is boosted for being one
+    — but a reel the question actually describes outranks reels whose only
+    claim is the shelf name the user said."""
+    query = "the Sales reel about bicep hacks for small arms"
+    vault, _ = _sales_vault_saved_in_order(
+        "https://instagram.com/reel/s1",
+        "https://instagram.com/reel/s2",
+        "https://instagram.com/reel/f1",
+        query=query,
+    )
+
+    answer = vault.ask(query)
+
+    assert isinstance(answer, SingleItemAnswer)
+    assert answer.reel.url == "https://instagram.com/p/f1"
+
+
+def test_a_single_question_naming_a_shelf_still_reports_nothing_when_nothing_matches() -> None:
+    query = "the Sales reel about repairing a bicycle puncture"
+    vault, _ = _sales_vault_saved_in_order(
+        "https://instagram.com/reel/s1", query=query, match_threshold=0.99
+    )
+
+    assert isinstance(vault.ask(query), NoMatch)

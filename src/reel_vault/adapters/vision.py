@@ -23,6 +23,8 @@ from openai.types.chat import (
     ChatCompletionUserMessageParam,
 )
 
+from reel_vault.adapters.llm import content_of
+
 logger = logging.getLogger(__name__)
 
 FRAME_PROMPT = """\
@@ -77,6 +79,19 @@ and never infer what is being said aloud - you cannot hear this video.
 
 
 class VisionFrameAnalyzer:
+    """The one model call in this app that cannot go through `_ChatAdapter`:
+    it sends image parts and no system prompt. It reads its reply through the
+    same `content_of` all the others do, which is the part that matters --
+    being outside `_complete` is how this adapter went through an audit of
+    every truncating call site without being counted, and the default vision
+    model is a reasoning model, so it fails exactly the same way.
+
+    An empty frame reading is meaningful here, so a truncated one is raised
+    rather than returned. `VideoMediaExtractor` catches it and records the
+    frames as unread; returning "" would have filed the reel as read with
+    nothing on screen, and nothing would ever have looked again.
+    """
+
     def __init__(self, *, client: OpenAI, model: str) -> None:
         self._client = client
         self._model = model
@@ -93,7 +108,12 @@ class VisionFrameAnalyzer:
         response = self._client.chat.completions.create(
             model=self._model, messages=[message], temperature=0.0
         )
-        return (response.choices[0].message.content or "").strip()
+        return content_of(
+            response,
+            model=self._model,
+            context=f"{len(frames)} frames",
+            empty_reply_is_meaningful=True,
+        ).strip()
 
 
 def _image_part(frame: bytes) -> ChatCompletionContentPartParam:

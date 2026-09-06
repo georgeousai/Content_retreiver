@@ -254,3 +254,38 @@ def test_frames_are_not_analyzed_when_none_could_be_sampled() -> None:
 
     assert result is not None
     assert result.frame_analysis == ""
+
+
+def test_an_extractor_with_no_analyzer_says_the_frames_went_unread() -> None:
+    """A do-nothing analyzer returning "" made an unset VISION_API_KEY — a
+    forgotten line in an .env — look exactly like a video with no text on
+    screen. Absent is now absent, and the result says so."""
+    result = _extractor(frame_analyzer=None).extract(URL)
+
+    assert result is not None
+    assert result.transcript == "spoken words"
+    assert result.frame_analysis == ""
+    assert result.frames_read is False
+
+
+def test_an_analyzer_that_read_nothing_still_counts_as_having_looked() -> None:
+    result = _extractor(frame_analyzer=_StubAnalyzer(text="")).extract(URL)
+
+    assert result is not None
+    assert result.frames_read is True
+
+
+def test_frames_are_not_sampled_at_all_when_there_is_nothing_to_read_them() -> None:
+    """No point decoding a video's frames into memory for an analyzer that
+    does not exist."""
+    sampler = _StubSampler()
+    sampler.sample = _fail_if_called  # type: ignore[method-assign]
+
+    result = _extractor(frame_sampler=sampler, frame_analyzer=None).extract(URL)
+
+    assert result is not None
+    assert result.frames_read is False
+
+
+def _fail_if_called(*args, **kwargs):
+    raise AssertionError("frames should not be sampled with no analyzer configured")

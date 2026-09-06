@@ -106,6 +106,40 @@ def embedding_text(
     return " | ".join(part.strip() for part in parts if part.strip())
 
 
+def embedding_text_for(
+    reel: SavedReel,
+    collection: str | None = None,
+    subcollection: str | None = None,
+) -> str:
+    """What an already-saved reel should be embedded as, optionally as if it
+    sat on a different shelf.
+
+    The one place a stored reel is turned into embedding text. Everything
+    except the shelf comes from the reel, so a move cannot quietly drop the
+    transcript it had already earned -- which is exactly what re-deriving the
+    text from the caption alone would do.
+
+    It exists as a function rather than a method on `Vault` because the
+    repair scripts need it too, and the three of them spelling
+    `embedding_text`'s arguments out for themselves is how a new embedded
+    field ends up reaching live reels and not backfilled ones.
+
+    Passing `collection` also decides `subcollection`: a move sets both, and
+    a sub-collection belongs to the shelf it was named under, so carrying the
+    old one across would file the reel under a pairing that never existed.
+    """
+    if collection is None:
+        collection, subcollection = reel.collection, reel.subcollection
+    return embedding_text(
+        reel.caption,
+        reel.tags,
+        collection,
+        subcollection,
+        reel.transcript_summary,
+        reel.frame_analysis_summary,
+    )
+
+
 def metadata_text(
     tags: list[str], collection: str, subcollection: str | None
 ) -> str:

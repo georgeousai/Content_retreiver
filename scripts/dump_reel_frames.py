@@ -59,9 +59,28 @@ def main(url: str, outdir: Path) -> int:
         return 1
 
     info = _describe_sampling(video, url)
-    for nth, (frame, index) in enumerate(zip(frames, info["chosen_indexes"])):
-        at = f"t{index / info['fps']:.1f}s" if info["fps"] else "t?"
-        (outdir / f"frame_{nth:02d}_idx{index}_{at}.jpg").write_bytes(frame)
+
+    # Labelled against the indexes that actually decoded, not against every
+    # index the chooser picked. The sampler silently drops an index it cannot
+    # read, so its output is shorter than its input whenever a chosen frame
+    # is unreadable — and zipping images against the full list slid every
+    # label after the first gap by one, mislabelling precisely the
+    # frame-to-timestamp correspondence this script exists to establish.
+    labels: list[int | None] = list(info["decoded_indexes"])
+    if len(labels) != len(frames):
+        print(
+            f"warning: {len(frames)} frames returned for {len(labels)} decodable "
+            f"indexes — writing them unnumbered rather than guessing which is which"
+        )
+        labels = [None] * len(frames)
+
+    for nth, (frame, index) in enumerate(zip(frames, labels)):
+        if index is None:
+            name = f"frame_{nth:02d}.jpg"
+        else:
+            at = f"t{index / info['fps']:.1f}s" if info["fps"] else "t?"
+            name = f"frame_{nth:02d}_idx{index}_{at}.jpg"
+        (outdir / name).write_bytes(frame)
     info["frames_written"] = len(frames)
 
     _write_contact_sheet(video, outdir / "all", info)
@@ -97,6 +116,7 @@ def _describe_sampling(video: Path, url: str) -> dict:
         starts = []
 
     chosen = choose_frame_indexes(starts, total, MAX_FRAMES)
+    decoded = _decodable(video, chosen)
     return {
         "url": url,
         "total_frames": total,
@@ -106,7 +126,32 @@ def _describe_sampling(video: Path, url: str) -> dict:
         "scene_starts": starts,
         "chosen_indexes": chosen,
         "chosen_times_s": [round(i / fps, 2) for i in chosen] if fps else None,
+        # Both are recorded, because the difference between them is itself a
+        # finding: an index the chooser picked and the decoder could not read
+        # is a frame production never saw either.
+        "decoded_indexes": decoded,
+        "undecodable_indexes": [i for i in chosen if i not in set(decoded)],
     }
+
+
+def _decodable(video: Path, indexes: list[int]) -> list[int]:
+    """Which of the chosen indexes actually yield a frame, in order.
+
+    The same seek-and-read `SceneDetectFrameSampler._encode_frame` does, for
+    the same reason: what the sampler hands back is only the subset it could
+    decode, and this script's whole job is to say which frame is which.
+    """
+    capture = cv2.VideoCapture(str(video))
+    try:
+        readable = []
+        for index in indexes:
+            capture.set(cv2.CAP_PROP_POS_FRAMES, index)
+            read, _ = capture.read()
+            if read:
+                readable.append(index)
+        return readable
+    finally:
+        capture.release()
 
 
 def _write_contact_sheet(video: Path, into: Path, info: dict) -> None:

@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import os
 import uuid
+from dataclasses import replace
 
 import pytest
 from dotenv import load_dotenv
 
-from reel_vault.models import SavedReel
+from reel_vault.models import ProcessingStatus, SavedReel
 
 load_dotenv()
 
@@ -254,3 +255,90 @@ def test_it_builds_its_own_schema_on_a_brand_new_database() -> None:
     finally:
         with psycopg.connect(admin_dsn, autocommit=True) as admin:
             admin.execute(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)")
+
+
+def test_update_overwrites_every_column_the_reel_carries(store) -> None:
+    """The port says "overwrite", and the in-memory store every seam test
+    runs against does exactly that. A partial UPDATE agrees with it on the
+    fields today's callers happen to change and diverges silently on the
+    rest — and because the fake overwrites wholesale, no seam test can ever
+    see the difference. This is the only place the two can be held to the
+    same meaning.
+    """
+    url = _unique_url()
+    store.save(
+        _reel(
+            url,
+            embedding=[0.1] * 384,
+            tags=["before"],
+            collection="Before",
+            subcollection="Old",
+            author_handle="before_handle",
+            author_name="Before Name",
+            thumbnail_ref="file-id-before",
+        )
+    )
+
+    before = store.find_by_url(url)
+    assert before is not None
+    store.update(
+        replace(
+            before,
+            caption="a caption that was edited after the save",
+            tags=["after", "edited"],
+            embedding=[0.2] * 384,
+            caption_embedding=[0.3] * 384,
+            collection="After",
+            subcollection="New",
+            author_handle="after_handle",
+            author_name="After Name",
+            thumbnail_ref="file-id-after",
+            user_placed=True,
+            transcript_raw="what was said",
+            transcript_summary="said, condensed",
+            frame_analysis_raw="what was shown",
+            frame_analysis_summary="shown, condensed",
+            processing_status=ProcessingStatus.DONE,
+        )
+    )
+
+    after = store.find_by_url(url)
+    assert after is not None
+    assert after.caption == "a caption that was edited after the save"
+    assert after.tags == ["after", "edited"]
+    assert after.collection == "After"
+    assert after.subcollection == "New"
+    assert after.author_handle == "after_handle"
+    assert after.author_name == "After Name"
+    assert after.thumbnail_ref == "file-id-after"
+    assert after.user_placed is True
+    assert after.transcript_summary == "said, condensed"
+    assert after.frame_analysis_summary == "shown, condensed"
+    assert after.processing_status is ProcessingStatus.DONE
+    assert after.embedding == pytest.approx([0.2] * 384, abs=1e-6)
+    assert after.caption_embedding == pytest.approx([0.3] * 384, abs=1e-6)
+    # The key and the date it was first saved are the two things a rewrite
+    # does not get to move.
+    assert after.url == before.url
+    assert after.saved_at == before.saved_at
+
+
+def test_update_rewrites_the_keyword_text_the_new_taxonomy_implies(store) -> None:
+    """`metadata_text` is what the keyword arm matches, and it is derived
+    from the tags and the shelf. A move that left it behind would keep the
+    reel findable by the shelf it had just left."""
+    url = _unique_url()
+    store.save(
+        _reel(url, embedding=[0.1] * 384, tags=["oldtag"], collection="OldShelf")
+    )
+
+    before = store.find_by_url(url)
+    assert before is not None
+    store.update(replace(before, collection="NewShelf", tags=["newtag"]))
+
+    row = store._conn.execute(
+        "SELECT metadata_text FROM saved_reels WHERE normalized_url = %s", (url,)
+    ).fetchone()
+    assert row is not None
+    assert "NewShelf" in row[0] and "newtag" in row[0]
+    assert "OldShelf" not in row[0] and "oldtag" not in row[0]

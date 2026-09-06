@@ -25,6 +25,7 @@ import pytest
 from openai import BadRequestError
 
 from reel_vault.adapters.llm import ChatContentCondenser, TruncatedResponse
+from reel_vault.adapters.vision import VisionFrameAnalyzer
 
 
 class _StubClient:
@@ -248,3 +249,41 @@ def test_the_other_aggregate_adapters_are_left_alone(adapter_name, call) -> None
     call(adapter)
 
     assert "reasoning_effort" not in client.calls[0]
+
+
+def _analyzer(content: str | None, finish_reason: str) -> VisionFrameAnalyzer:
+    return VisionFrameAnalyzer(
+        client=_StubClient(content, finish_reason),  # type: ignore[arg-type]
+        model="test-vision",
+    )
+
+
+def test_the_vision_adapter_checks_finish_reason_too() -> None:
+    """The adapter the audit missed. It cannot share `_ChatAdapter._complete`
+    — it sends image parts and no system prompt — and being outside
+    `_complete` is exactly how it went through an audit of "every adapter"
+    without being counted. The default vision model is a reasoning model, so
+    it fails the same way: a truncated reply returned "", the frames were
+    recorded as unreadable, and nothing looked again."""
+    with pytest.raises(TruncatedResponse):
+        _analyzer("", "length").analyze([b"jpeg-bytes"])
+
+
+def test_frames_a_vision_model_deliberately_read_as_empty_are_still_an_answer() -> None:
+    """A video of nothing but transitions genuinely has no text to report."""
+    assert _analyzer("", "stop").analyze([b"jpeg-bytes"]) == ""
+
+
+def test_a_vision_reply_cut_off_mid_sentence_is_kept() -> None:
+    """Partial is not nothing: text already read off the frames is worth
+    keeping, exactly as it is for the chat adapters."""
+    assert _analyzer("on screen: WAKE 5AM", "length").analyze([b"jpeg"]) == (
+        "on screen: WAKE 5AM"
+    )
+
+
+def test_no_frames_means_no_call_at_all() -> None:
+    analyzer = _analyzer("unused", "stop")
+
+    assert analyzer.analyze([]) == ""
+    assert analyzer._client.calls == []  # type: ignore[attr-defined]

@@ -318,6 +318,41 @@ class TruncatedResponse(RuntimeError):
     """
 
 
+def content_of(
+    response: ChatCompletion,
+    *,
+    model: str,
+    context: str,
+    empty_reply_is_meaningful: bool = False,
+) -> str:
+    """The text of a reply, with one cut off before it started told apart
+    from one that is deliberately empty.
+
+    Module-level, and not a method on `_ChatAdapter`, because not every call
+    this app makes fits that class: the vision adapter sends image parts and
+    no system prompt, so it cannot share `_complete` -- and being outside
+    `_complete` is precisely how it went a full audit without this check,
+    reintroducing the bug that audit was for. Anything that reads a
+    `/chat/completions` reply reads it through here.
+
+    `empty_reply_is_meaningful` decides which of the two a caller can afford
+    to confuse. Callers that parse what comes back -- a tag list, a JSON
+    classification -- already degrade sensibly from an unparseable reply, so
+    they take a warning in the log. Callers for which "nothing" is itself an
+    answer cannot tell the two apart on their own, and ask to be told.
+    """
+    choice = response.choices[0]
+    content = choice.message.content or ""
+    if not content.strip() and choice.finish_reason == "length":
+        message = (
+            f"{model} used its whole output budget without answering ({context})"
+        )
+        if empty_reply_is_meaningful:
+            raise TruncatedResponse(message)
+        logger.warning("%s; treating it as no answer", message)
+    return content
+
+
 def _is_about_reasoning_effort(error: BadRequestError) -> bool:
     """Whether a 400 is the provider objecting to `reasoning_effort` itself.
 
@@ -349,21 +384,13 @@ class _ChatAdapter:
         reasoning_effort: str | None = None,
         empty_reply_is_meaningful: bool = False,
     ) -> str:
-        """One chat call, with a reply cut off before it started told apart
-        from a reply that is deliberately empty.
+        """One chat call, its reply read through `content_of`.
 
-        `empty_reply_is_meaningful` is what decides which of those a caller
-        can afford to confuse. Most adapters here parse what comes back — a
-        tag list, a JSON classification — so a truncated reply is simply an
-        unparseable one, and each already degrades sensibly from that: no
-        tags, `SINGLE`, `Uncategorized`. Raising at them would turn a reel
-        saved without tags into a save that fails outright, which is worse
-        than the thing being fixed. They get a warning in the log instead.
-
-        The condenser is the exception, and the reason this distinction
-        exists: an empty reply is one of its two valid answers, so it cannot
-        tell "there was nothing in this transcript" from "I never got to
-        answer". It asks to be told.
+        `empty_reply_is_meaningful` is passed straight down; see `content_of`
+        for what it decides. Most adapters here parse what comes back — a tag
+        list, a JSON classification — and already degrade sensibly from an
+        unparseable reply: no tags, `SINGLE`, `Uncategorized`. The condenser
+        is the exception, and the reason the distinction exists at all.
 
         `reasoning_effort` is passed only when a caller asks for it. A
         provider that rejects the parameter has the call remade without it,
@@ -388,17 +415,12 @@ class _ChatAdapter:
             self._reasoning_effort_unsupported = True
             response = self._request(system_prompt, user_content, temperature, {})
 
-        choice = response.choices[0]
-        content = choice.message.content or ""
-        if not content.strip() and choice.finish_reason == "length":
-            message = (
-                f"{self._model} used its whole output budget without "
-                f"answering ({len(user_content)} chars in)"
-            )
-            if empty_reply_is_meaningful:
-                raise TruncatedResponse(message)
-            logger.warning("%s; treating it as no answer", message)
-        return content
+        return content_of(
+            response,
+            model=self._model,
+            context=f"{len(user_content)} chars in",
+            empty_reply_is_meaningful=empty_reply_is_meaningful,
+        )
 
     def _request(
         self, system_prompt: str, user_content: str, temperature: float, extra: dict
