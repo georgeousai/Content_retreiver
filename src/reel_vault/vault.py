@@ -47,7 +47,13 @@ from reel_vault.ports import (
     Summarizer,
     Tagger,
 )
-from reel_vault.search import embedding_text, embedding_text_for, search_terms
+from reel_vault.search import (
+    embedding_text,
+    embedding_text_for,
+    rank_within_shelf,
+    search_terms,
+    terms_beyond_the_shelf,
+)
 from reel_vault.substance import has_substance
 from reel_vault.urls import normalize_reel_url
 
@@ -573,7 +579,9 @@ class Vault:
         # shelf instead threw the question away and returned whichever reel
         # came back first.
         if classification.collection and kind is not QueryKind.SINGLE:
-            return self._answer_from_collection(query, classification)
+            answer = self._answer_from_collection(query, classification)
+            if answer is not None:
+                return answer
 
         matches = self._matches(query, kind)
 
@@ -645,25 +653,48 @@ class Vault:
 
     def _answer_from_collection(
         self, query: str, classification: QueryClassification
-    ) -> Answer:
-        """The user named a shelf and asked for what is on it, so read the
-        shelf. Similarity ranking has nothing to add here and plenty to lose:
-        "5yrs ago this wasn't a thing" genuinely belongs to Sales, but no
-        query about sales will ever score close enough to a caption like that
-        to clear the threshold.
+    ) -> Answer | None:
+        """The user named a shelf. They asked either for the shelf or for
+        something on it, and which it was decides how much of the shelf they
+        get back.
 
-        Only for the kinds that answer *from* a shelf — browsing it,
-        summarizing it, ranking across it. A question about one particular
-        reel that happens to name a shelf is not one of them: `ask` keeps
-        those on the search path, because there the shelf is a scope and the
-        question is still the thing being asked.
+        Asked for the shelf -- "show me my Sales reels", "summarize what my
+        Sales reels said" -- read the shelf. Similarity ranking has nothing
+        to add there and plenty to lose: "5yrs ago this wasn't a thing"
+        genuinely belongs to Sales, but no query about sales will ever score
+        close enough to a caption like that to clear the threshold.
+
+        Asked for something on it -- "Travel plans for Arambol" -- the shelf
+        is a scope and the rest of the question is still the question. Live,
+        that query came back as every reel on Travel: the shelf was read and
+        the question thrown away. So the shelf's reels are ranked against the
+        query, and only those that answer it come back.
+
+        `None` when nothing on the shelf answers, and `ask` goes on to search
+        the whole vault. The shelf is a scope, not a verdict -- the reel
+        asked about may sit somewhere other than where the user remembers --
+        which is the same reasoning that keeps SINGLE questions off this path
+        altogether: `ask` sends those straight to search, where the shelf
+        counts towards the ranking without deciding it.
         """
         collection = classification.collection or ""
         kind = classification.kind
-        reels = self._store.find_by_collection(collection)[: self._top_k[kind]]
+        shelf = self._store.find_by_collection(collection)
 
-        if not reels:
+        if not shelf:
             return NoMatch(query=query)
+
+        if terms_beyond_the_shelf(query, collection):
+            reels = rank_within_shelf(
+                shelf,
+                self._embedder.embed(query),
+                self._retrieval.match_threshold,
+                self._top_k[kind],
+            )
+            if not reels:
+                return None
+        else:
+            reels = shelf[: self._top_k[kind]]
 
         written = self._written_answer(query, kind, reels)
         if written is not None:

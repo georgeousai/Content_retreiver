@@ -13,6 +13,7 @@ drift that let the URL matcher and the dedup key disagree (see
 
 from __future__ import annotations
 
+import math
 import re
 
 from reel_vault.models import SavedReel
@@ -49,6 +50,32 @@ QUERY_NOISE = frozenset(
 )
 
 _WORD = re.compile(r"[A-Za-z0-9]+")
+
+# Words that describe the *answer* wanted rather than the *reels* wanted:
+# how to present them (list, summarize, grouped by creator) or which to pick
+# out from among them (best, worst). "Summarize what my Sales reels said,
+# grouped by creator" asks for the whole shelf in a particular shape;
+# "Travel plans for Arambol" asks for one reel on it. What is left of a query
+# once the shelf's own name, QUERY_NOISE and these are removed is how the two
+# are told apart -- see `terms_beyond_the_shelf`.
+#
+# Kept apart from QUERY_NOISE, which the keyword arm also reads. "creator" is
+# noise in "grouped by creator" and a real term in "reels about creator
+# monetization"; the keyword arm's coverage should go on counting it, and
+# only the shelf-or-topic decision should not.
+ANSWER_SHAPE = frozenset(
+    """
+    list listing lists
+    summarize summarise summary summaries overview recap digest rundown
+    grouped group grouping sorted sort
+    best top worst better favourite favorite
+    rank ranked ranking compare compared comparison
+    compile compiled compilation
+    creator creators author authors
+    said say says saying talk talks talked mention mentions mentioned
+    cover covers covered discuss discusses discussed
+    """.split()
+)
 
 
 def embedding_text(
@@ -175,6 +202,76 @@ def search_terms(query: str) -> list[str]:
         if len(folded) > 1 and folded not in QUERY_NOISE:
             terms.setdefault(folded, None)
     return list(terms)
+
+
+def terms_beyond_the_shelf(query: str, collection: str) -> list[str]:
+    """The words of a query that ask for something more specific than the
+    shelf it named.
+
+    A query that names a collection is one of two things, and the vault used
+    to treat both as the first. "Show me my Travel reels" wants the shelf.
+    "Travel plans for Arambol" wants one reel on it -- and answering it with
+    the whole shelf, as happened live, hands over the haystack and calls it
+    the needle.
+
+    What tells them apart is what is left once the shelf's own name, the
+    framing noise and the answer-shape words are taken away. Nothing left
+    means the shelf was the whole request. Anything left is a topic, and the
+    shelf's reels should be ranked against it.
+
+    The shelf's name is removed word by word, so "my strength reels" names a
+    shelf called "Strength Training" and leaves nothing behind. No stemming:
+    a query saying "sale" for a shelf called "Sales" leaves "sale" over and
+    is ranked rather than browsed. The caller falls back to the ordinary
+    search when a ranking comes up empty, and that search's keyword arm does
+    stem -- so the cost is a detour, not the answer.
+    """
+    shelf = {word.casefold() for word in _WORD.findall(collection)}
+    return [
+        term
+        for term in search_terms(query)
+        if term not in shelf and term not in ANSWER_SHAPE
+    ]
+
+
+def cosine_similarity(a: list[float], b: list[float]) -> float:
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(y * y for y in b))
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+def rank_within_shelf(
+    reels: list[SavedReel],
+    query_embedding: list[float],
+    threshold: float,
+    top_k: int,
+) -> list[SavedReel]:
+    """One shelf's reels, ranked by how well each answers the query, cut at
+    the relevance floor and capped.
+
+    Ranked here rather than by the store's search because that search ranks
+    the whole vault and cuts at `top_k` before any shelf filter could apply:
+    a shelf of forty reels sitting behind fifty more similar-looking reels
+    elsewhere would come back empty. A shelf is small enough to hold whole,
+    so ranking it in memory means no reel on it can be crowded out by the
+    rest of the vault.
+
+    Cosine on the stored embeddings, without the keyword arm. Every reel on
+    the shelf carries the shelf's name, so that arm would score them all
+    alike on it, and what remains of the query is prose, best matched by
+    meaning. A sub-collection named in the query still counts, because the
+    sub-collection is part of what each reel is embedded as.
+    """
+    scored = [
+        (reel, cosine_similarity(query_embedding, reel.embedding)) for reel in reels
+    ]
+    scored.sort(key=lambda pair: pair[1], reverse=True)
+    return [reel for reel, score in scored[:top_k] if score >= threshold]
 
 
 def keyword_score(matched_terms: int, total_terms: int) -> float:

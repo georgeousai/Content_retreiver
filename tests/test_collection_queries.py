@@ -7,9 +7,12 @@ these tests come straight from live failures where it was the latter.
 
 from __future__ import annotations
 
+import pytest
+
 from reel_vault.models import (
     AggregateAnswer,
     CollectionAssignment,
+    CompareAnswer,
     ExtractedPost,
     ListAnswer,
     NoMatch,
@@ -18,8 +21,15 @@ from reel_vault.models import (
     Saved,
     SingleItemAnswer,
 )
+from reel_vault.search import search_terms, terms_beyond_the_shelf
+from reel_vault.vault import DEFAULT_MATCH_THRESHOLD
 from tests.conftest import make_vault
-from tests.fakes import FakeQueryIntent, FakeSummarizer, InMemoryReelStore
+from tests.fakes import (
+    FakeComparer,
+    FakeQueryIntent,
+    FakeSummarizer,
+    InMemoryReelStore,
+)
 
 POSTS = {
     "https://instagram.com/reel/s1": ExtractedPost(
@@ -209,3 +219,164 @@ def test_a_single_question_naming_a_shelf_still_reports_nothing_when_nothing_mat
     )
 
     assert isinstance(vault.ask(query), NoMatch)
+
+
+# --- a question *within* a shelf, as opposed to a request *for* it ----------
+#
+# Live failure, 2026-09-06: "Travel plans for Arambol" answered with every
+# reel on the Travel shelf. Naming the shelf sent the query straight to the
+# shelf, and the rest of the question was discarded.
+
+TRAVEL_POSTS = {
+    "https://instagram.com/reel/t1": ExtractedPost(
+        caption="Arambol beaches in Goa travel plans for 3 days",
+        author_handle="goawanderer",
+    ),
+    "https://instagram.com/reel/t2": ExtractedPost(
+        caption="Kerala backwaters houseboat itinerary over 5 days",
+        author_handle="southbound",
+    ),
+    "https://instagram.com/reel/t3": ExtractedPost(
+        caption="Ladakh bike trip route and permits",
+        author_handle="highpassrider",
+    ),
+}
+TRAVEL_URLS = {
+    "https://instagram.com/p/t1",
+    "https://instagram.com/p/t2",
+    "https://instagram.com/p/t3",
+}
+ALL_ASSIGNMENTS = {
+    **ASSIGNMENTS,
+    **{
+        post.caption: CollectionAssignment(collection="Travel")
+        for post in TRAVEL_POSTS.values()
+    },
+}
+
+
+def _shelf_scoped(query: str, kind: QueryKind, collection: str = "Travel") -> FakeQueryIntent:
+    """The classifier's reading of a query that names a shelf: the shape of
+    answer asked for, and the shelf. It never says whether the shelf was the
+    whole request -- that is the vault's call."""
+    return FakeQueryIntent(
+        classifications={
+            query: QueryClassification(kind=kind, collection=collection)
+        }
+    )
+
+
+def _travel_vault(query: str, kind: QueryKind, **overrides) -> tuple:
+    """Sales, Fitness and Travel shelves, and a query classified as given.
+
+    At the production relevance floor, not `make_vault`'s permissive
+    default: whether a within-shelf ranking keeps only the reel asked about
+    is exactly what the floor decides.
+    """
+    overrides.setdefault("match_threshold", DEFAULT_MATCH_THRESHOLD)
+    store = InMemoryReelStore()
+    vault = make_vault(
+        captions={**POSTS, **TRAVEL_POSTS},
+        assignments=ALL_ASSIGNMENTS,
+        store=store,
+        query_intent=_shelf_scoped(query, kind),
+        **overrides,
+    )
+    for url in [*POSTS, *TRAVEL_POSTS]:
+        assert isinstance(vault.save_reel(url), Saved)
+    return vault, store
+
+
+def test_a_question_within_a_shelf_returns_only_the_reels_it_describes() -> None:
+    """The live failure itself. Three reels on Travel; one is about Arambol."""
+    query = "Travel plans for Arambol"
+    vault, _ = _travel_vault(query, QueryKind.LIST)
+
+    answer = vault.ask(query)
+
+    assert isinstance(answer, ListAnswer)
+    assert answer.collection == "Travel"
+    assert [reel.url for reel in answer.reels] == ["https://instagram.com/p/t1"]
+
+
+@pytest.mark.parametrize(
+    "query, kind",
+    [
+        ("show me all my Travel reels", QueryKind.LIST),
+        ("list everything in Travel", QueryKind.LIST),
+        ("summarize what my Travel reels said, grouped by creator", QueryKind.AGGREGATE),
+        ("which of my Travel reels is best", QueryKind.COMPARE_RANK),
+    ],
+)
+def test_asking_for_the_shelf_itself_still_gets_all_of_it(
+    query: str, kind: QueryKind
+) -> None:
+    """Words about the *shape* of the answer -- list it, summarize it, pick
+    the best -- are not a topic to rank the shelf against. Every one of
+    these wants the whole shelf, and a similarity floor applied to them
+    would drop the reels whose captions happen not to resemble the phrasing
+    (the "5yrs ago this wasn't a thing" problem again)."""
+    vault, _ = _travel_vault(query, kind)
+
+    answer = vault.ask(query)
+
+    assert isinstance(answer, (ListAnswer, AggregateAnswer, CompareAnswer))
+    assert {reel.url for reel in answer.reels} == TRAVEL_URLS
+
+
+def test_a_ranked_question_within_a_shelf_ranks_only_the_reels_it_describes() -> None:
+    """The comparer is asked about the reels that fit the question, not the
+    whole shelf with the question left for it to re-apply."""
+    query = "best Travel reel about Goa beaches"
+    comparer = FakeComparer()
+    vault, _ = _travel_vault(query, QueryKind.COMPARE_RANK, comparer=comparer)
+
+    answer = vault.ask(query)
+
+    assert isinstance(answer, CompareAnswer)
+    _, sources = comparer.calls[-1]
+    assert [source.author_handle for source in sources] == ["goawanderer"]
+
+
+def test_a_shelf_question_nothing_on_the_shelf_answers_falls_back_to_the_whole_vault() -> None:
+    """The shelf is a scope, not a verdict. Someone who misremembers which
+    shelf a reel is on should still get the reel -- from wherever it is --
+    and never a worse answer than plain search would have given."""
+    query = "Travel reels about bicep hacks for small arms"
+    vault, _ = _travel_vault(query, QueryKind.LIST)
+
+    answer = vault.ask(query)
+
+    assert isinstance(answer, ListAnswer)
+    assert answer.collection is None
+    assert [reel.url for reel in answer.reels] == ["https://instagram.com/p/f1"]
+
+
+@pytest.mark.parametrize(
+    "query, collection, residue",
+    [
+        # The shelf is the whole request.
+        ("show me all my Sales reels", "Sales", []),
+        ("summarize what my Sales reels said, grouped by creator", "Sales", []),
+        ("which of my Travel reels is best", "Travel", []),
+        ("list everything in Travel", "Travel", []),
+        # A multi-word shelf, named in part.
+        ("my strength reels", "Strength Training", []),
+        # A topic within the shelf.
+        ("Travel plans for Arambol", "Travel", ["plans", "arambol"]),
+        ("Sales reels about cold calling", "Sales", ["cold", "calling"]),
+        ("best Travel reel about Goa beaches", "Travel", ["goa", "beaches"]),
+    ],
+)
+def test_what_a_shelf_query_asks_for_beyond_the_shelf(
+    query: str, collection: str, residue: list[str]
+) -> None:
+    assert terms_beyond_the_shelf(query, collection) == residue
+
+
+def test_answer_shape_words_still_count_for_keyword_search() -> None:
+    """"creator" is noise in "grouped by creator" and a real term in a query
+    about creators. Only the shelf-or-topic decision drops it; the keyword
+    arm's coverage goes on scoring it."""
+    assert "creator" in search_terms("reels about creator monetization")
+    assert terms_beyond_the_shelf("Sales reels grouped by creator", "Sales") == []

@@ -73,6 +73,22 @@ starting another status file. Check items off (or move them to
   fail again. Three tests in `test_media_pipeline.py` pin unread-vs-empty.
   **Not done:** `DJWt0lGyRGJ` itself was written before this and still sits
   as `done`; only a re-read pass fixes existing rows.
+- [x] **DONE 2026-09-06 — "Travel plans for Arambol" returned the whole
+  Travel shelf.** Naming a shelf sent every non-SINGLE query straight to
+  `find_by_collection`, question discarded. Now `terms_beyond_the_shelf`
+  (`search.py`) strips the shelf's own name, the framing noise and the
+  answer-shape words ("summarize", "grouped by creator", "best") from the
+  query. Nothing left: browse the shelf as before. Anything left: rank the
+  shelf's reels against the query in Python (`rank_within_shelf`, cosine on
+  the stored embeddings — not the store's search, whose whole-vault top-k
+  could crowd an entire shelf out) and return only those above the match
+  threshold. Nothing on the shelf clearing it falls through to ordinary
+  whole-vault search, so this never returns less than plain search did.
+  **Watch:** on the live Travel shelf the runner-up scored 0.297 against the
+  0.30 floor. If a within-shelf question ever brings back a neighbour it
+  shouldn't, the top-1/top-2 gap is the signal to move to, not a lower
+  floor — a per-collection threshold was considered and rejected because
+  the density that matters is per-query, not per-shelf.
 - [ ] **The classifier only ever sees the caption** — the transcript and
   frame summaries arrive later, in the background, after the collection is
   already assigned. Real cost, 2026-09-06: a Bengaluru restaurant-visit reel
