@@ -6,6 +6,8 @@ A personal vault for the ocean of Instagram Reels you save and never find again.
 
 Runs entirely on your own machine. No server, no hosting bill, no per-reel API charges.
 
+Instagram Reels is where this started, not where it ends. The goal is a single vault for everything you save and would otherwise never see again — a TikTok video, a LinkedIn post, a static Instagram photo, a Pinterest pin, an article — asked about in one place, in plain language. See [Where this is going](#where-this-is-going).
+
 ---
 
 ## The problem
@@ -65,7 +67,9 @@ flowchart LR
 
 ## Status
 
-**Built and working end-to-end against real services**, with 187 tests passing and a clean `mypy` run.
+**Built and working end-to-end against real services**, with 287 tests passing and a clean `mypy` run.
+
+**What exists today, in one paragraph:** share an Instagram Reel to the bot and it extracts the caption, files it into a collection it invents or reuses, tags it, downloads the video in the background, transcribes the audio, samples frames at scene changes and reads any on-screen text, condenses both into what search actually reads, and embeds the result — all before you'd have finished re-watching the reel yourself. Ask a question in plain English and it works out whether you want one reel, a list, an answer synthesized across many, a ranked comparison, or a compiled list, and answers accordingly, citing which reels it drew from.
 
 | # | Capability | Status |
 |---|---|---|
@@ -95,7 +99,7 @@ A third slice ([`.scratch/reel-vault-media-pipeline/`](.scratch/reel-vault-media
 | 05 | Background processing after save, resumed after a restart | ✅ Done |
 | 06 | Compare/rank and extract/compile query kinds | ✅ Done |
 
-**Deliberately not built yet:** LinkedIn, TikTok and YouTube Shorts sources, multi-user accounts, a web UI, and cloud hosting. The architecture is built so these are *additive* rather than rewrites — see [the roadmap](#where-this-is-going).
+**Deliberately not built yet:** any source beyond Instagram Reels (TikTok, LinkedIn, Pinterest, static image posts, general web links), multi-user accounts, a web UI, and cloud hosting. The architecture is built so these are *additive* rather than rewrites — see [the roadmap](#where-this-is-going).
 
 ---
 
@@ -265,11 +269,17 @@ Two things that will bite eventually, documented so they don't cost you an after
 
 ## Where this is going
 
-The vault now reads what a reel says and shows, not only what its caption wrote. What remains narrow: Instagram only, Telegram only, one user. The seam design exists so each of the following is an added adapter rather than a rewrite.
+**The end goal isn't an Instagram tool. It's one vault for everything you save and would otherwise never see again** — a TikTok video, a LinkedIn post, a static Instagram photo, a Pinterest pin, an article you meant to finish — organized without effort and answerable in one place, in plain language, regardless of where it came from. Instagram Reels on Telegram is the first slice, built to prove the core loop (extract → organize → embed → answer) before widening what feeds it. What remains narrow today: one source, one intake channel, one user.
 
-**More sources.** LinkedIn posts and blog links become additional caption fetchers. `save_reel` doesn't change — it never knew what Instagram was.
+The seam design exists so widening is additive, not a rewrite — `save_reel` and `ask` have never known what Instagram is. What's added for each new kind of thing depends on what shape the thing actually is:
 
-**More platforms.** TikTok, YouTube Shorts and LinkedIn, deliberately sequenced *after* the media pipeline rather than alongside it: what is platform-specific is only URL parsing and extraction, and every bug in the shared core would otherwise be inherited by each new platform the moment it was added.
+**Text with no media** — a LinkedIn post, a tweet, a blog link — needs only a new `CaptionFetcher`. Nothing else in the pipeline runs differently; a text-only save already works exactly this way today whenever a reel's caption alone is enough.
+
+**A single static image** — an Instagram photo post, a Pinterest pin — needs a fetcher plus one read through the *existing* vision adapter, given one image instead of a run of sampled video frames. The adapter that reads a whiteboard in a reel is already doing the job a pin's image would need; there's no second vision pipeline to build.
+
+**Video** — TikTok, YouTube Shorts — is the closest fit to what's already built: a download step, the existing transcription and frame-sampling pipeline, condensing, embedding. The part that's genuinely new per platform is small: how to fetch that platform's video and caption, not how to understand what's in it.
+
+**More platforms, deliberately sequenced *after* the shared core is solid rather than alongside it.** What's platform-specific is only URL parsing and extraction; classification, search, correction and synthesis are already platform-agnostic in the `Vault`/ports architecture. Every bug found in the shared core this project has shipped — and there have been real ones — would otherwise be inherited by every platform the moment it's added, multiplying the cost of finding it later instead of now.
 
 **A real UI.** Telegram is a great intake channel and a mediocre browsing one. A web interface over the same vault would add topic browsing, a tag cloud, filtering by date, and reading a synthesized answer alongside the reels it came from.
 
@@ -277,7 +287,7 @@ The vault now reads what a reel says and shows, not only what its caption wrote.
 
 **Always-on.** Cloud hosting so saves are processed instantly rather than whenever the bot next runs — though Telegram's message queueing makes this less urgent than it sounds.
 
-The end state is a personal knowledge base that happens to be fed by social media: everything you've ever saved, organized without effort, and answerable in plain language.
+The end state is a personal knowledge base that happens to be fed by whatever you save, from wherever you saved it — not a vault that only understands one platform's shape of content.
 
 ---
 
