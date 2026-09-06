@@ -15,6 +15,7 @@ from tests.fakes import (
     FakeItemExtractor,
     FakeMediaExtractor,
     FakeQueryIntent,
+    FakeReranker,
     FakeSummarizer,
     FakeTagger,
     InMemoryReelStore,
@@ -37,6 +38,7 @@ def make_vault(
     comparer: FakeComparer | None = None,
     item_extractor: FakeItemExtractor | None = None,
     media_extractor: FakeMediaExtractor | None = None,
+    reranker: FakeReranker | None = None,
     condenser: FakeCondenser | None = None,
     embedder: FakeEmbedder | None = None,
     query_intent: FakeQueryIntent | None = None,
@@ -65,6 +67,10 @@ def make_vault(
             item_extractor if item_extractor is not None else FakeItemExtractor()
         ),
         media_extractor=media_extractor,
+        # Left off unless a test asks for one, so that every test written
+        # before reranking existed goes on exercising the similarity-only
+        # path it was written against.
+        reranker=reranker,
         # Verbatim by default so a test can assert the video's words are
         # findable without also having to model what condensing did to them.
         condenser=condenser if condenser is not None else FakeCondenser(verbatim=True),

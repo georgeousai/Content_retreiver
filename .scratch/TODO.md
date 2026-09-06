@@ -137,6 +137,40 @@ starting another status file. Check items off (or move them to
 
 ## Retrieval / embedding
 
+- [x] **DONE 2026-09-06 — Similarity cannot judge which saved reel answers a
+  question; a reranker now does.** Four measured failures, every one with the
+  arithmetic right: "restaurant, not a home recipe" ranked Steak Sandwiches
+  above the Ramen reel whose own caption says "ramen restaurant";
+  "technique, not just motivation" returned the whole Strength Training
+  shelf, a caption reading only "Youtube: dbrev" scoring 0.400 against the
+  one real answer's 0.401; "a snack, not a full meal" put a full meal above
+  the reel tagged `snack`; and "trekking, not a beach day" answered with a
+  reel about paper *maps* (0.307) while the actual trek scored 0.176 and was
+  cut by the floor entirely. The wanted and unwanted halves of each question
+  share a subject, so an embedding of the sentence carries "not Y" as more
+  words about Y — no threshold separates that, because the difference is not
+  one of degree. New `Reranker` port and `ChatReranker`; similarity became
+  the shortlister. Within a shelf the floor is dropped entirely (the shelf is
+  already a filter the user named); whole-vault queries shortlist from 0.15.
+  Live, three identical runs: all four questions answer correctly, breadth
+  questions ("recipes I can cook at home", "reels about building muscle")
+  keep every reel, adversarial ones stay empty.
+  **Two things worth remembering.** `reasoning_effort="low"` — right for the
+  condenser and the extractor — is *wrong* here, and was measured so: at
+  60-78 reasoning tokens the model replied "[]" on two runs of three,
+  emptying a shelf that held the answer. Starved of budget it does not judge
+  worse, it declines to judge. The default (~570 tokens, finishing on `stop`)
+  is 3/3. And an empty verdict over reels similarity was *confident* about is
+  now overridden rather than obeyed: a wrongly-kept reel costs a glance, a
+  wrongly-dropped one is never known to have existed.
+- [ ] **Watch what the reranker costs.** It now runs on almost every
+  question — skipped only when there is one candidate already over the
+  threshold, or none at all. Roughly 600 reasoning tokens a call against a
+  free tier that has run out repeatedly. If quota becomes the binding
+  constraint before accuracy does, the cheap lever is to skip it when the
+  query carries no exclusion ("not", "rather than", "actually") and the
+  top-1/top-2 similarity gap is already wide — that is the case similarity
+  was never getting wrong.
 - [ ] Whole-vault, topic-less extract queries ("compile every tool my reels
   mention") still return `NoMatch` — the extractor itself works, but
   retrieval is similarity-first and never hands it anything.

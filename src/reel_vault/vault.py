@@ -44,13 +44,14 @@ from reel_vault.ports import (
     MediaExtractor,
     QueryIntent,
     ReelStore,
+    Reranker,
     Summarizer,
     Tagger,
 )
 from reel_vault.search import (
     embedding_text,
     embedding_text_for,
-    rank_within_shelf,
+    scored_within_shelf,
     search_terms,
     terms_beyond_the_shelf,
 )
@@ -73,6 +74,34 @@ logger = logging.getLogger(__name__)
 # regression test depends on.
 DEFAULT_MATCH_THRESHOLD = 0.30
 
+# The floor for a reel a `Reranker` will get to read before it is dropped.
+#
+# The match threshold above is a guess made from similarity alone, and
+# measurement on the live vault showed it guessing both ways: a reel about an
+# actual trek scored 0.176 against "Travel reels about trekking, not a beach
+# day" and was cut, while a reel about trekking *maps* scored 0.307 and was
+# answered with. Nothing about 0.30 was wrong -- the number sat where the
+# evidence put it -- but no single number can separate "this is the answer"
+# from "this shares words with the question", because similarity does not
+# measure the difference.
+#
+# So where a reranker is configured, similarity stops being the judge and
+# becomes the shortlister, and the shortlist reaches lower. 0.15 sits below
+# the 0.176 that was wrongly cut and around the 0.198 that the adversarial
+# queries -- questions the vault genuinely cannot answer -- topped out at
+# when the threshold was calibrated. Junk that clears it is what the
+# reranker is for; the cost of it clearing is one call that answers "none of
+# these".
+DEFAULT_SHORTLIST_FLOOR = 0.15
+
+# How many shortlisted reels a reranker is asked to read at once. Every one
+# of them is a caption plus two condensed summaries in a single prompt, so
+# this bounds what one question can cost. Beyond it, similarity order decides
+# who gets read -- which is the old failure in miniature, and the reason this
+# is set well above the size of a normal shelf rather than trimmed to save
+# tokens.
+DEFAULT_RERANK_CANDIDATES = 20
+
 # One cap per intent, not one shared cap: a list costs only a database read, so
 # it can be generous, while every reel in an aggregate becomes part of a single
 # LLM prompt — the free-tier budget, not relevance, is what bounds it.
@@ -91,6 +120,25 @@ DEFAULT_NEIGHBOUR_COUNT = 5
 # noise presented in the same shape as a real signal, which is worse than
 # saying nothing.
 DEFAULT_NEIGHBOUR_FLOOR = 0.25
+
+
+def _worth_reranking(
+    candidates: list[SavedReel], confident: list[SavedReel]
+) -> bool:
+    """Whether asking a reranker about this shortlist can change anything.
+
+    Nothing shortlisted, nothing to read. One shortlisted reel that already
+    cleared the match threshold is the answer either way, and paying for a
+    call that can only agree is what would make this feature cost more than
+    it is worth on the commonest question there is.
+
+    A single reel that did *not* clear the threshold is worth a call: the
+    whole question there is whether the one thing similarity half-matched
+    belongs in front of the user at all.
+    """
+    if not candidates:
+        return False
+    return len(candidates) > 1 or not confident
 
 
 @dataclass(frozen=True)
@@ -116,6 +164,10 @@ class RetrievalSettings:
     top_k_aggregate: int = DEFAULT_TOP_K_AGGREGATE
     neighbour_count: int = DEFAULT_NEIGHBOUR_COUNT
     neighbour_floor: float = DEFAULT_NEIGHBOUR_FLOOR
+    # Both read only when a `Reranker` is configured; without one the match
+    # threshold is still the whole of retrieval's judgement.
+    shortlist_floor: float = DEFAULT_SHORTLIST_FLOOR
+    rerank_candidates: int = DEFAULT_RERANK_CANDIDATES
 
     def caps(self) -> dict[QueryKind, int]:
         """One cap per intent, not one shared cap: a list costs only a
@@ -166,6 +218,11 @@ class Vault:
         # pipeline existed, and every test that is not about media should not
         # have to supply one.
         media_extractor: MediaExtractor | None = None,
+        # Optional for the same reason the media extractor is: without one
+        # the vault retrieves exactly as it always did, on similarity and a
+        # threshold. What it adds is judgement about the shortlist, and every
+        # path that uses it keeps a similarity-only answer to fall back on.
+        reranker: Reranker | None = None,
         retrieval: RetrievalSettings | None = None,
     ) -> None:
         self._caption_fetcher = caption_fetcher
@@ -178,6 +235,7 @@ class Vault:
         self._comparer = comparer
         self._item_extractor = item_extractor
         self._media_extractor = media_extractor
+        self._reranker = reranker
         self._condenser = condenser
         self._retrieval = retrieval or RetrievalSettings()
         self._top_k = self._retrieval.caps()
@@ -600,16 +658,84 @@ class Vault:
         return SingleItemAnswer(reel=matches[0])
 
     def _matches(self, query: str, kind: QueryKind) -> list[SavedReel]:
-        """The reels this query actually reaches, capped for its intent and
-        cut at the relevance floor. One place, so every path that asks "what
-        matched?" asks it the same way."""
-        return [
+        """The reels this query actually reaches, capped for its intent. One
+        place, so every path that asks "what matched?" asks it the same way.
+
+        Without a reranker this is the relevance floor and nothing else, as
+        it has always been. With one, the floor drops to `shortlist_floor`
+        and stops being the last word: what similarity produces is a
+        shortlist, and which of those reels answer the question is read off
+        the reels themselves.
+        """
+        hits = self._store.search(
+            self._embedder.embed(query), search_terms(query), self._top_k[kind]
+        )
+        confident = [
             reel
-            for reel, relevance in self._store.search(
-                self._embedder.embed(query), search_terms(query), self._top_k[kind]
-            )
+            for reel, relevance in hits
             if relevance >= self._retrieval.match_threshold
         ]
+        if self._reranker is None:
+            return confident
+
+        # Never above the match threshold: a shortlist narrower than what the
+        # threshold alone would have returned could only hide a reel from the
+        # judgement and then hand it over unjudged.
+        floor = min(self._retrieval.shortlist_floor, self._retrieval.match_threshold)
+        shortlist = [reel for reel, relevance in hits if relevance >= floor][
+            : self._retrieval.rerank_candidates
+        ]
+        return self._reranked(query, shortlist, confident)[: self._top_k[kind]]
+
+    def _reranked(
+        self, query: str, candidates: list[SavedReel], confident: list[SavedReel]
+    ) -> list[SavedReel]:
+        """The candidates that actually answer the question, best first.
+
+        `confident` is what similarity alone would have returned, and is the
+        answer whenever the reranker cannot improve on it: there is nothing
+        to decide, or it failed. Retrieval must never get *worse* for having
+        a reranker configured — a judgement that is unavailable is not a
+        judgement that nothing matched.
+
+        An empty list is kept as it is *unless* similarity was confident,
+        which is the one place these two signals are allowed to disagree and
+        the judgement does not win. "I read these and none of them address
+        the question" is the answer a threshold could never give, and where
+        similarity was unconvinced too it stands. But a reranker that empties
+        a shelf similarity was sure about has silenced reels the user can no
+        longer discover, on one call that measured unstable -- the same
+        question emptied the Strength Training shelf on two runs of three
+        while the answer sat on it. Falling back is then no better than the
+        old behaviour, and the old behaviour is the floor this must never go
+        under.
+        """
+        if self._reranker is None or not _worth_reranking(candidates, confident):
+            return confident
+        try:
+            kept = self._reranker.rerank(
+                query, [SummarySource.of(reel) for reel in candidates]
+            )
+        except Exception:
+            # One unanswered call must not cost the user their answer. The
+            # shortlist is still ordered by similarity, which is what the
+            # vault answered from before this existed.
+            logger.exception(
+                "Reranking failed for %r; keeping what similarity matched", query
+            )
+            return confident
+        # Bounds-checked here as well as in the adapter: this is the seam,
+        # and any `Reranker` implementation at all reaches it.
+        reels = [candidates[index] for index in kept if 0 <= index < len(candidates)]
+        if not reels and confident:
+            logger.info(
+                "Reranker kept none of %d candidates for %r that similarity "
+                "was confident about; keeping what similarity matched",
+                len(candidates),
+                query,
+            )
+            return confident
+        return reels
 
     def _written_answer(
         self, query: str, kind: QueryKind, reels: list[SavedReel]
@@ -685,12 +811,7 @@ class Vault:
             return NoMatch(query=query)
 
         if terms_beyond_the_shelf(query, collection):
-            reels = rank_within_shelf(
-                shelf,
-                self._embedder.embed(query),
-                self._retrieval.match_threshold,
-                self._top_k[kind],
-            )
+            reels = self._narrowed_to_the_question(query, shelf, kind)
             if not reels:
                 return None
         else:
@@ -701,3 +822,32 @@ class Vault:
             return written
 
         return ListAnswer(query=query, reels=reels, collection=collection)
+
+    def _narrowed_to_the_question(
+        self, query: str, shelf: list[SavedReel], kind: QueryKind
+    ) -> list[SavedReel]:
+        """The reels on one shelf that answer a question asked within it.
+
+        With a reranker, the shelf goes over *unfiltered* — ordered by
+        similarity, capped, but with no relevance floor at all. The floor is
+        a guard against the rest of the vault, and there is no rest of the
+        vault here: the collection is already a hard filter the user named,
+        and everything on it is a reel they chose to keep under that name.
+        All the floor could do is hide one, which is what it did — the reel
+        about an actual trek scored 0.176 on a question about trekking and
+        never reached an answer, while the reel about trekking maps cleared
+        0.30 and became one.
+        """
+        scored = scored_within_shelf(shelf, self._embedder.embed(query))
+        confident = [
+            reel
+            for reel, score in scored[: self._top_k[kind]]
+            if score >= self._retrieval.match_threshold
+        ]
+        if self._reranker is None:
+            return confident
+
+        candidates = [
+            reel for reel, _ in scored[: self._retrieval.rerank_candidates]
+        ]
+        return self._reranked(query, candidates, confident)[: self._top_k[kind]]

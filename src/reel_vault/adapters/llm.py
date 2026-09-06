@@ -244,6 +244,45 @@ justification, keep the item.
 recipe); otherwise most-mentioned first."""
 
 
+RERANK_SYSTEM_PROMPT = """\
+The user asked a question about videos they saved. A rough search picked the \
+numbered videos below as possibly relevant. It matches on subject matter and \
+wording alone, so some of them are here only for sharing vocabulary with the \
+question. Decide which ones actually answer it.
+
+Reply with ONLY a JSON array of the numbers you keep, best answer first: \
+[3, 1]. Reply [] if none of them answer the question.
+
+KEEPING is the default. Drop a video only for one of two reasons: the \
+question explicitly ruled it out, or it is about a plainly different subject. \
+Anything else stays, including a video that only partly helps and a video too \
+thin to tell much about. The two mistakes do not cost the same. A video kept \
+loosely costs the user one glance and they can see for themselves. A video \
+wrongly dropped is one they are never told they have, and they cannot ask for \
+what they do not know was there. When you are unsure at all, keep it.
+
+The one thing you must do that the search could not: read the part of the \
+question saying what the user does NOT want. "X, not Y", "X rather than Y" \
+and "actually X" mean a video that is Y is ruled out even though it sits \
+squarely in the right subject -- and that is usually the single strongest \
+reason to drop anything. The search shortlisted on wording, so it read \
+"not Y" as more words about Y and ranked the excluded half first. This is the \
+main reason you are being asked.
+
+Judge on what a video contains: the caption its creator wrote, what was said \
+in it, and what was shown on screen. A recipe is still a recipe when its \
+caption is one word and the steps are only on screen.
+
+A broad question wants breadth. Where the user asked about a subject rather \
+than for one particular thing, everything on that subject stays, and it is \
+not your job to pick the best of them.
+
+Order what you keep best-answer-first.
+
+Use only the numbers shown, each at most once. Never invent a number, and \
+never reply with anything but the JSON array."""
+
+
 COLLECTION_SYSTEM_PROMPT = (
     "You file a saved social-media post into a personal library. You are given "
     "the post's caption, the library's EXISTING collections (each with its "
@@ -531,6 +570,37 @@ class ChatItemExtractor(_ChatAdapter):
         return _parse_items(content)
 
 
+class ChatReranker(_ChatAdapter):
+    def rerank(self, query: str, sources: list[SummarySource]) -> list[int]:
+        content = self._complete(
+            system_prompt=RERANK_SYSTEM_PROMPT,
+            user_content=_question_with_numbered_sources(query, sources),
+            # Which saved videos answer a question is not a matter of taste,
+            # and the same question asked twice returning different reels is
+            # the kind of thing that costs a user their trust in the answer.
+            temperature=0.0,
+            # Deliberately NOT `reasoning_effort="low"`, unlike the extractor
+            # and condenser above, and measured rather than assumed. On
+            # "Which of my Strength Training reels is about actual training
+            # technique, not just motivation?" against the live shelf,
+            # 2026-09-06, three runs each:
+            #
+            #   low       60-78 reasoning tokens    1/3 correct, 2/3 "[]"
+            #   medium    528-1081                  2/3 correct, 1/3 one extra
+            #   default   557-586                   3/3 correct
+            #
+            # Reading several videos and judging each against a question that
+            # excludes half its own subject is not the mechanical work
+            # condensing is. Starved of budget the model does not answer
+            # worse, it answers "none of them" -- which is the one reply that
+            # empties a shelf holding the answer, and which nothing
+            # downstream can tell from a considered rejection. There is no
+            # truncation risk to trade against: every run finished on `stop`
+            # well inside the budget that broke the extractor at 2046.
+        )
+        return _parse_kept_indices(content, len(sources))
+
+
 class ChatContentCondenser(_ChatAdapter):
     def condense(self, text: str) -> str:
         return self._complete(
@@ -591,7 +661,22 @@ def _question_with_sources(query: str, sources: list[SummarySource]) -> str:
     return f"Question: {query}\n\nSaved videos:\n{block}"
 
 
-def _format_source(source: SummarySource) -> str:
+def _question_with_numbered_sources(query: str, sources: list[SummarySource]) -> str:
+    """The same block the answer-writers get, with each reel numbered from 1.
+
+    Numbered because the reranker answers *about* these reels rather than
+    from them, and needs a way to name one. One-based because the reply is
+    written by a model reading a list, and a list a person would read starts
+    at one; the caller subtracts.
+    """
+    block = "\n\n".join(
+        _format_source(source, bullet=f"{index}.")
+        for index, source in enumerate(sources, start=1)
+    )
+    return f"Question: {query}\n\nSaved videos:\n{block}"
+
+
+def _format_source(source: SummarySource, bullet: str = "-") -> str:
     """One reel as the answer-writers see it: who made it, what they wrote,
     and — where the video has been read — what was said and shown in it.
 
@@ -608,7 +693,7 @@ def _format_source(source: SummarySource) -> str:
     else:
         who = source.author_handle or source.author_name or "unknown creator"
 
-    lines = [f"- [by {who}] caption: {source.caption}"]
+    lines = [f"{bullet} [by {who}] caption: {source.caption}"]
     if source.transcript:
         lines.append(f"  spoken in the video: {source.transcript}")
     if source.frame_text:
@@ -760,6 +845,46 @@ def _parse_items(content: str) -> list[str]:
         if text:
             seen.setdefault(text.casefold(), text)
     return list(seen.values())
+
+
+def _parse_kept_indices(content: str, count: int) -> list[int]:
+    """Parse the reranker's array of one-based numbers into indices.
+
+    Two failures have to stay distinguishable here, because they mean
+    opposite things. A reply of `[]` is the model saying none of the
+    shortlisted reels answer the question, which is exactly what this call
+    exists to be able to hear. A reply that does not parse, or that names
+    nothing real, is the model failing to answer at all — and reading that as
+    "none of them" would turn every bad reply into a confident "nothing
+    matched" for a user whose vault does hold the answer. So an unusable
+    reply keeps every candidate, in the order similarity already put them,
+    which is what the vault did before there was a reranker.
+
+    Out-of-range and repeated numbers are dropped rather than trusted: they
+    are the two ways a list of numbers goes wrong, and either would otherwise
+    reach the user as a duplicated or a wrong reel.
+    """
+    parsed = _loads_json(content)
+    if not isinstance(parsed, list):
+        logger.warning("Reranker returned non-JSON content: %r", content)
+        return list(range(count))
+
+    kept: dict[int, None] = {}
+    for value in parsed:
+        try:
+            index = int(value) - 1
+        except (TypeError, ValueError):
+            continue
+        if 0 <= index < count:
+            kept.setdefault(index, None)
+
+    if parsed and not kept:
+        # It answered with something, and none of it named a reel on offer.
+        logger.warning(
+            "Reranker named none of the %d reels it was given: %r", count, content
+        )
+        return list(range(count))
+    return list(kept)
 
 
 def _parse_tag_list(content: str) -> list[str]:

@@ -22,6 +22,7 @@ from reel_vault.adapters.llm import (
     ChatContentCondenser,
     ChatItemExtractor,
     ChatQueryIntent,
+    ChatReranker,
     ChatSummarizer,
     ChatTagger,
     chat_client,
@@ -90,6 +91,7 @@ def build_vault(config: Config) -> Vault:
         summarizer=ChatSummarizer(client=llm, model=config.llm.model),
         comparer=ChatComparer(client=llm, model=config.llm.model),
         item_extractor=ChatItemExtractor(client=llm, model=config.llm.model),
+        reranker=ChatReranker(client=llm, model=config.llm.model),
         condenser=ChatContentCondenser(
             client=condenser_client, model=config.condenser.model
         ),

@@ -219,6 +219,40 @@ class Comparer(Protocol):
         ...
 
 
+class Reranker(Protocol):
+    def rerank(self, query: str, sources: list[SummarySource]) -> list[int]:
+        """Which of the shortlisted reels actually answer the question, best
+        first, as indices into `sources`.
+
+        Retrieval shortlists by similarity, which is a measure of shared
+        subject matter and nothing else. That is the wrong instrument for
+        three things measured failing on the live vault (2026-09-06):
+
+        - It cannot read exclusion. "A restaurant, not a home recipe" and
+          "technique, not motivation" both name the unwanted half in the
+          query, and an embedding of the whole sentence carries that half as
+          more topic words to match on rather than as a subtraction.
+        - It cannot tell substance from vocabulary. A reel whose caption is
+          only "Youtube: dbrev" plus hashtags scored 0.400 against a question
+          about training technique -- level with the one reel that actually
+          taught any (0.401).
+        - Its floor hides as well as filters. A reel about an actual trek
+          scored 0.176 and was cut, while a reel about trekking *maps* scored
+          0.307 and was answered with.
+
+        So this reads the shortlist and decides, which is a judgement rather
+        than a measurement. Returning indices rather than reels keeps that
+        judgement from being able to invent, substitute or edit a reel: the
+        worst a wrong answer here can do is keep or drop the wrong one of the
+        candidates it was given.
+
+        An empty list is a real answer -- none of these address the question
+        -- and callers act on it. An implementation that cannot judge at all
+        must say so by raising, never by returning nothing.
+        """
+        ...
+
+
 class ItemExtractor(Protocol):
     def extract_items(self, query: str, sources: list[SummarySource]) -> list[str]:
         """Pull the specific things the user asked for out of the matched

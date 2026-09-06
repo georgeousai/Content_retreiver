@@ -6,7 +6,7 @@ from __future__ import annotations
 import math
 import re
 import zlib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 
 from reel_vault.models import (
@@ -376,6 +376,49 @@ class FakeMediaExtractor:
         if isinstance(found, Exception):
             raise found
         return found
+
+
+class FakeReranker:
+    """Keeps the candidates whose text contains one of the markers a test
+    names, ordered as the markers were given.
+
+    Deliberately not clever. A fake that worked out for itself which reels
+    answer a question would be a second, unmeasured retrieval implementation
+    living in the test suite, and a test using it would be asserting that the
+    fake agrees with the vault rather than that the vault handles a
+    judgement correctly. The default keeps everything in the order given --
+    the no-op.
+
+    Markers rather than indices because the vault can ask twice for one
+    question: a shelf that answers nothing falls through to a whole-vault
+    search, and the same reranker is handed a different shortlist the second
+    time. A fixed list of positions would silently mean something different
+    on that second call.
+    """
+
+    def __init__(
+        self,
+        keeps: Sequence[str] | None = None,
+        *,
+        raises: bool = False,
+    ) -> None:
+        self._keeps = keeps
+        self.raises = raises
+        self.calls: list[tuple[str, list[SummarySource]]] = []
+
+    def rerank(self, query: str, sources: list[SummarySource]) -> list[int]:
+        self.calls.append((query, list(sources)))
+        if self.raises:
+            raise RuntimeError("reranker is down")
+        if self._keeps is None:
+            return list(range(len(sources)))
+
+        kept: list[int] = []
+        for marker in self._keeps:
+            for index, source in enumerate(sources):
+                if index not in kept and marker.casefold() in _all_text(source).casefold():
+                    kept.append(index)
+        return kept
 
 
 class FakeCondenser:

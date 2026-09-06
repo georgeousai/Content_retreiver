@@ -245,16 +245,12 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
-def rank_within_shelf(
-    reels: list[SavedReel],
-    query_embedding: list[float],
-    threshold: float,
-    top_k: int,
-) -> list[SavedReel]:
-    """One shelf's reels, ranked by how well each answers the query, cut at
-    the relevance floor and capped.
+def scored_within_shelf(
+    reels: list[SavedReel], query_embedding: list[float]
+) -> list[tuple[SavedReel, float]]:
+    """One shelf's reels and how well each answers the query, best first.
 
-    Ranked here rather than by the store's search because that search ranks
+    Scored here rather than by the store's search because that search ranks
     the whole vault and cuts at `top_k` before any shelf filter could apply:
     a shelf of forty reels sitting behind fifty more similar-looking reels
     elsewhere would come back empty. A shelf is small enough to hold whole,
@@ -266,12 +262,17 @@ def rank_within_shelf(
     alike on it, and what remains of the query is prose, best matched by
     meaning. A sub-collection named in the query still counts, because the
     sub-collection is part of what each reel is embedded as.
+
+    The scores come back with the reels, rather than being spent on a filter
+    inside this function, because the caller wants two cuts of the same
+    ranking -- everything, to hand to a reranker as candidates, and the part
+    above the relevance floor, to fall back on where no reranker answers.
     """
     scored = [
         (reel, cosine_similarity(query_embedding, reel.embedding)) for reel in reels
     ]
     scored.sort(key=lambda pair: pair[1], reverse=True)
-    return [reel for reel, score in scored[:top_k] if score >= threshold]
+    return scored
 
 
 def keyword_score(matched_terms: int, total_terms: int) -> float:
