@@ -131,6 +131,11 @@ asked.
 heading or bullet.
 - Group by theme by default. Group by creator only when the user asked who \
 said what.
+- Where you use a heading, lead it with ONE emoji that fits what the section \
+is actually about (a creator's focus, a theme) - e.g. "## 💪 Sean Nalewanyj \
+(@sean_nalewanyj)". Skip it rather than force one that fits nothing. Never \
+put an emoji anywhere but at the start of a heading - not in running \
+sentences, not on bullets, not decorating a word.
 - SKIP any reel that does not address the question. A reel that merely \
 carries a relevant hashtag adds nothing - leave it out rather than padding \
 the answer with it.
