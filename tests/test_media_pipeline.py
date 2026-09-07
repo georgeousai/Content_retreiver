@@ -11,7 +11,7 @@ import pytest
 
 from reel_vault.adapters.media import VideoMediaExtractor
 from reel_vault.bot import ReelVaultBot
-from reel_vault.models import MediaExtraction, ProcessingStatus
+from reel_vault.models import MediaExtraction, MediaUnavailable, ProcessingStatus
 from tests.conftest import make_vault
 from tests.fakes import FakeMediaExtractor, InMemoryReelStore
 
@@ -132,12 +132,118 @@ async def test_one_reel_failing_does_not_stop_the_worker(
     a transcript, with nothing to say anything stopped."""
     bot = _bot(store, media_extractor=FakeMediaExtractor())
     bot._vault.process_media = MagicMock(side_effect=[RuntimeError("boom"), None])
-    bot._queue_media("first")
-    bot._queue_media("second")
+    bot._queue_media("first", chat_id=None)
+    bot._queue_media("second", chat_id=None)
 
     await _drain(bot)
 
     assert bot._vault.process_media.call_count == 2
+
+
+# --- telling the user when a video did not get read -------------------------
+#
+# The "Saved!" card goes out minutes before the video is read, from a queue
+# the user cannot see. A reel that arrived with no transcript and no frame
+# text looked exactly like one that was read and genuinely had nothing in it,
+# and the only record of the difference was a database column -- which is not
+# somewhere a person using a Telegram bot can be asked to look.
+
+
+def _sent_notes(sends: AsyncMock) -> list[str]:
+    """Everything the worker said back, as text."""
+    return [call.kwargs["text"] for call in sends.await_args_list]
+
+
+def _bot_with_captured_sends(
+    store: InMemoryReelStore, **overrides
+) -> tuple[ReelVaultBot, AsyncMock]:
+    """The worker answers through `_app.bot`, not through a message it is
+    replying to -- by the time a video has been read, the message that
+    started it is minutes old. `ExtBot` refuses attribute assignment, so the
+    application it hangs off is what gets swapped, and the mock is handed
+    back rather than read off the bot: the attribute is typed as the real
+    application, and reaching through it for mock internals does not type."""
+    bot = _bot(store, **overrides)
+    sends = AsyncMock()
+    app = MagicMock()
+    app.bot.send_message = sends
+    bot._app = app
+    return bot, sends
+
+
+async def test_a_video_that_could_not_be_fetched_is_reported(
+    store: InMemoryReelStore,
+) -> None:
+    """The live case: Instagram served nothing for two posts, both were filed
+    `failed`, and the user was told neither -- they found out by being shown
+    the database."""
+    extractor = FakeMediaExtractor({SAVED_URL: MediaUnavailable(SAVED_URL)})
+    bot, sends = _bot_with_captured_sends(store, media_extractor=extractor)
+    await bot._on_message(_make_update(_make_message(URL)), MagicMock())
+
+    await _drain(bot)
+
+    saved = store.find_by_url(SAVED_URL)
+    assert saved is not None
+    assert saved.processing_status is ProcessingStatus.UNAVAILABLE
+    note = "\n".join(_sent_notes(sends))
+    assert "wouldn't hand over the video" in note
+    # Named, because a burst of saves means several of these in a row.
+    assert SAVED_URL in note
+
+
+async def test_frames_left_unread_are_reported_as_such(
+    store: InMemoryReelStore,
+) -> None:
+    """Distinct from the above in what it promises: the words were heard, so
+    the reel is far more findable than a caption-only one -- but anything
+    written on screen still is not."""
+    extractor = FakeMediaExtractor(
+        {SAVED_URL: MediaExtraction(transcript="wake at five", frames_read=False)}
+    )
+    bot, sends = _bot_with_captured_sends(store, media_extractor=extractor)
+    await bot._on_message(_make_update(_make_message(URL)), MagicMock())
+
+    await _drain(bot)
+
+    note = "\n".join(_sent_notes(sends))
+    assert "heard the audio" in note
+
+
+async def test_a_video_read_in_full_is_not_announced(
+    store: InMemoryReelStore,
+) -> None:
+    """Silence on success, deliberately. The common case is that it worked,
+    and a second message per reel saying so is noise on every burst."""
+    extractor = FakeMediaExtractor({SAVED_URL: MediaExtraction(transcript="wake at five")})
+    bot, sends = _bot_with_captured_sends(store, media_extractor=extractor)
+    await bot._on_message(_make_update(_make_message(URL)), MagicMock())
+
+    await _drain(bot)
+
+    assert _sent_notes(sends) == []
+
+
+async def test_work_resumed_after_a_restart_is_read_but_not_reported(
+    store: InMemoryReelStore,
+) -> None:
+    """Which chat asked for a reel does not survive the restart, so there is
+    nobody to answer. The video is still read -- the reporting is the part
+    that cannot be done, and it must not take the reading down with it."""
+    extractor = FakeMediaExtractor({SAVED_URL: MediaUnavailable(SAVED_URL)})
+    interrupted = _bot(store, media_extractor=extractor)
+    await interrupted._on_message(_make_update(_make_message(URL)), MagicMock())
+
+    restarted, sends = _bot_with_captured_sends(store, media_extractor=extractor)
+    await restarted._on_start(MagicMock())
+    assert restarted._media_worker is not None
+    restarted._media_worker.cancel()
+    await _drain(restarted)
+
+    saved = store.find_by_url(SAVED_URL)
+    assert saved is not None
+    assert saved.processing_status is ProcessingStatus.UNAVAILABLE
+    assert _sent_notes(sends) == []
 
 
 class _StubDownloader:
@@ -238,8 +344,17 @@ def test_a_transcription_failure_keeps_what_the_frames_showed() -> None:
     assert result.frame_analysis == "on screen: WAKE 5AM"
 
 
-def test_a_download_failure_reports_nothing_rather_than_raising() -> None:
-    assert _extractor(downloader=_StubDownloader(fails=True)).extract(URL) is None
+def test_a_video_that_could_not_be_fetched_says_so_in_its_own_type() -> None:
+    """Deliberately not `None`, which is what this returned before.
+
+    `None` is the answer for a video that downloaded and turned out to hold
+    nothing -- a fact about the reel. A video Instagram would not serve is a
+    fact about Instagram, and the two reached the vault as the same value,
+    were filed under the same status, and left the user unable to tell a
+    login-gated post from a silent one.
+    """
+    with pytest.raises(MediaUnavailable):
+        _extractor(downloader=_StubDownloader(fails=True)).extract(URL)
 
 
 def test_a_video_nothing_could_be_read_from_reports_nothing() -> None:

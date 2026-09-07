@@ -24,6 +24,15 @@ class ProcessingStatus(Enum):
     PENDING = "pending"
     DONE = "done"
     FAILED = "failed"
+    # The video could not be fetched at all, so there was never anything to
+    # read. Split out from FAILED because the two are different events with
+    # different answers: FAILED is "we got the video and got nothing out of
+    # it", which is a fact about the video, while this is "Instagram would
+    # not hand it over" -- most often a post that needs a login to view, or
+    # one taken down since it was shared. Only the second is worth telling
+    # the user about in those words, and only the second might succeed on a
+    # later attempt without anything about the reel having changed.
+    UNAVAILABLE = "unavailable"
     # Reels saved before the pipeline existed. Distinct from DONE, which
     # claims the video was actually read, and from PENDING, which would queue
     # every old reel for download the next time the bot starts.
@@ -41,6 +50,18 @@ class ProcessingStatus(Enum):
     # absent model. A pass with a working vision model is how they get
     # finished, and this status is what lets such a pass find them.
     FRAMES_UNREAD = "frames_unread"
+
+
+class MediaUnavailable(RuntimeError):
+    """The reel's video could not be fetched, so nothing could be read.
+
+    A domain type rather than an adapter one, because the vault has to tell
+    this apart from every other way reading a video fails: everything else
+    means the video was in hand and gave nothing up, and this means it was
+    never in hand. The user is owed those in different words -- one is about
+    their reel, the other is about Instagram declining to serve it to a
+    caller that is not logged in.
+    """
 
 
 @dataclass(frozen=True)

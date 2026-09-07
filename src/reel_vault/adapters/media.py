@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Protocol
 
 from reel_vault.media import MAX_FRAMES
-from reel_vault.models import MediaExtraction
+from reel_vault.models import MediaExtraction, MediaUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -70,8 +70,15 @@ class VideoMediaExtractor:
         self._max_frames = max_frames
 
     def extract(self, url: str) -> MediaExtraction | None:
-        """Everything the video carries, or None if it carries nothing we
-        could get at.
+        """Everything the video carries, or None if the video was read and
+        carried nothing. Raises `MediaUnavailable` if it could not be fetched
+        at all.
+
+        Those last two used to be the same answer, and the user was told
+        neither. A post Instagram will not serve without a login came back
+        indistinguishable from a video that downloaded fine and turned out to
+        be silent with a blank screen -- both `None`, both filed FAILED, both
+        reported as nothing at all.
 
         The audio and the picture fail independently. A reel whose speech
         transcribed cleanly but whose frames could not be read is still worth
@@ -99,7 +106,7 @@ class VideoMediaExtractor:
         with tempfile.TemporaryDirectory(prefix="reel-vault-") as workspace:
             video = self._download(url, Path(workspace))
             if video is None:
-                return None
+                raise MediaUnavailable(url)
 
             frame_analysis, frames_read = self._read_frames(video)
             extraction = MediaExtraction(

@@ -35,6 +35,7 @@ from reel_vault.models import (
     ListAnswer,
     NeedsCollectionChoice,
     NoMatch,
+    ProcessingStatus,
     Saved,
     SavedReel,
     SaveResult,
@@ -51,6 +52,32 @@ from reel_vault.vault import Vault
 logger = logging.getLogger(__name__)
 
 NO_MATCH_REPLY = "Nothing in the vault matches that."
+
+# What to say when a reel's video did not get fully read, per the state the
+# pipeline left it in. Each says what is missing and what the reel can still
+# do, because "saved" and "searchable by everything in the video" are not the
+# same promise and the user has no other way to tell which one they got.
+#
+# DONE and SKIPPED are absent on purpose: nothing went wrong, so nothing is
+# said. PENDING is absent because it is not an outcome -- a reel still in the
+# queue has not finished, and announcing it would be a message about work in
+# progress that is about to be superseded.
+MEDIA_TROUBLE = {
+    ProcessingStatus.UNAVAILABLE: (
+        "Saved, but Instagram wouldn't hand over the video — usually a post "
+        "that needs a login to view, or one that's been taken down. I've kept "
+        "the caption, so this reel is findable by that alone. Re-share the "
+        "link later if you think it was temporary."
+    ),
+    ProcessingStatus.FAILED: (
+        "Saved, but I couldn't get anything out of the video — no speech I "
+        "could hear, nothing readable on screen. Findable by its caption."
+    ),
+    ProcessingStatus.FRAMES_UNREAD: (
+        "Saved, and I heard the audio — but I couldn't read what was on "
+        "screen this time. Anything written in the video isn't searchable yet."
+    ),
+}
 # Distinct from NO_MATCH_REPLY: reels matched, they just did not contain the
 # thing that was asked for. Saying "nothing matches" there would send the user
 # looking for saves that are sitting right in front of them.
@@ -276,7 +303,10 @@ class ReelVaultBot:
         # transcription plus a run of vision calls, all against free tiers
         # that rate-limit, and twenty reels shared in a burst would otherwise
         # start twenty downloads at once and fail most of them.
-        self._media_queue: asyncio.Queue[str] = asyncio.Queue()
+        # The chat rides along with the URL so a video that could not be read
+        # can be reported back to whoever shared it. None for work resumed
+        # after a restart, where that is no longer known.
+        self._media_queue: asyncio.Queue[tuple[str, int | None]] = asyncio.Queue()
         self._media_worker: asyncio.Task[None] | None = None
         self._app = (
             Application.builder().token(token).post_init(self._on_start).build()
@@ -300,10 +330,13 @@ class ReelVaultBot:
         """
         self._media_worker = asyncio.create_task(self._read_videos())
         for url in self._vault.resume_pending_media():
-            self._queue_media(url)
+            # No chat: this is work a previous run left behind, and which
+            # chat asked for it did not survive the restart. It still gets
+            # read, it just cannot be reported on.
+            self._queue_media(url, chat_id=None)
 
-    def _queue_media(self, url: str) -> None:
-        self._media_queue.put_nowait(url)
+    def _queue_media(self, url: str, *, chat_id: int | None) -> None:
+        self._media_queue.put_nowait((url, chat_id))
 
     async def _read_videos(self) -> None:
         """One reel at a time, forever.
@@ -314,9 +347,11 @@ class ReelVaultBot:
         this queue exists to avoid.
         """
         while True:
-            url = await self._media_queue.get()
+            url, chat_id = await self._media_queue.get()
             try:
-                await asyncio.to_thread(self._vault.process_media, url)
+                reel = await asyncio.to_thread(self._vault.process_media, url)
+                if reel is not None and chat_id is not None:
+                    await self._report_unread_media(chat_id, reel)
             except Exception:
                 # A failure here is one reel without a transcript. Letting it
                 # end the worker would be every later reel without one, with
@@ -324,6 +359,28 @@ class ReelVaultBot:
                 logger.exception("Reading the video for %s failed", url)
             finally:
                 self._media_queue.task_done()
+
+    async def _report_unread_media(self, chat_id: int, reel: SavedReel) -> None:
+        """Say so when a reel's video did not get read.
+
+        Reading a video happens minutes after the "Saved!" card, in a queue
+        the user cannot see, so a reel that arrived with no transcript and no
+        frame text used to look exactly like one that was read and had
+        nothing in it. The difference was recorded only in a database column,
+        which is not somewhere a user of a Telegram bot can be asked to look.
+
+        Silence on success is deliberate: the common case is that everything
+        worked, and a second message per reel saying so would be noise on
+        every burst of saves. This speaks only when something is missing.
+        """
+        note = MEDIA_TROUBLE.get(reel.processing_status)
+        if note is None:
+            return
+        await self._app.bot.send_message(
+            chat_id=chat_id,
+            text=f'<a href="{_esc(reel.url)}">{_esc(reel.url)}</a>\n{note}',
+            parse_mode=ParseMode.HTML,
+        )
 
     async def _on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message
@@ -400,8 +457,10 @@ class ReelVaultBot:
             await self._confirm_save(message, result)
             # Queued after the confirmation, never before it: the point of
             # the queue is that sharing a reel stays as fast as it is today,
-            # and reading its video takes minutes.
-            self._queue_media(result.reel.url)
+            # and reading its video takes minutes. The chat travels with it so
+            # a video that cannot be read can be reported back to whoever
+            # shared it.
+            self._queue_media(result.reel.url, chat_id=message.chat_id)
         elif isinstance(result, AlreadySaved):
             # Show the picture here too: recognizing the reel you just
             # re-shared is the same problem as recognizing one you searched for.

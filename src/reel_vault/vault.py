@@ -23,6 +23,7 @@ from reel_vault.models import (
     ExtractionFailed,
     ListAnswer,
     MediaExtraction,
+    MediaUnavailable,
     NeedsCollectionChoice,
     NoMatch,
     ProcessingStatus,
@@ -495,6 +496,14 @@ class Vault:
 
         try:
             extraction = self._media_extractor.extract(normalized)
+        except MediaUnavailable:
+            # Not a failure of ours, and worth saying so in its own word:
+            # Instagram would not serve the video to a caller that is not
+            # logged in, which is what a login-gated or removed post looks
+            # like from here. The caption is already saved and already
+            # answers questions; only the video is missing.
+            logger.info("The video at %s could not be fetched", normalized)
+            return self._record_status(normalized, ProcessingStatus.UNAVAILABLE)
         except Exception:
             # The reel is already saved and already answers on its caption.
             # A background job that takes the process down with it, or leaves
@@ -503,6 +512,17 @@ class Vault:
             extraction = None
 
         return self.attach_media(normalized, extraction)
+
+    def _record_status(
+        self, normalized_url: str, status: ProcessingStatus
+    ) -> SavedReel | None:
+        """Write where a reel got to, changing nothing else about it."""
+        existing = self._store.find_by_url(normalized_url)
+        if existing is None:
+            return None
+        updated = replace(existing, processing_status=status)
+        self._store.update(updated)
+        return updated
 
     def attach_media(
         self, url: str, extraction: MediaExtraction | None
